@@ -1,0 +1,229 @@
+# CASE FILES — Stage 1 Specification
+
+Private two-player detective game. An AI game master (Claude API) generates a complete hidden case, then narrates it live while two detectives investigate and solve it together on one shared screen.
+
+This document is the full brief for Stage 1. Build exactly this. Do not add features from "Out of scope."
+
+---
+
+## 1. Constraints
+
+- Vanilla HTML, CSS, JS. Single-page PWA. No frameworks, no build step.
+- Hosting: Netlify with auto-deploy from GitHub `main`.
+- One Netlify Function (`netlify/functions/gm.js`) is the only backend. It holds the API key (env var `ANTHROPIC_API_KEY`) and proxies calls to the Anthropic API. The key must never reach the browser.
+- Persistence: localStorage only. Keys: `cf-settings`, `cf-current-game`, `cf-archive`. Never rename these later without a migration function.
+- Model: `claude-sonnet-4-6`. `max_tokens`: 3000 for case generation, 1500 for turns, 1500 for accusation.
+- Players: exactly two detectives sharing one screen (they are on a video call together). No accounts, no auth, no multiplayer sync.
+
+## 2. Repo and files
+
+```
+/index.html
+/style.css
+/app.js
+/prompts.js          <- exports the three prompt templates (section 7), imported by gm.js at build via functions bundling or duplicated verbatim
+/netlify/functions/gm.js
+/manifest.webmanifest
+/icons/
+/netlify.toml
+```
+
+## 3. Game flow (Stage 1 = Deduction Mode only)
+
+1. **Home screen.** Logo, "New Case" button, "Continue Case" (if `cf-current-game` exists), "Archive" list of finished cases.
+2. **Setup screen.** Two name fields (Detective 1 / Detective 2, prefilled from `cf-settings` after first game). A "case flavor" selector: Murder / Disappearance / Heist / Surprise us. Optional free-text field: "Anything you want in this case?" Then "Open the case file."
+3. **Case generation.** One call to the function with `type: "newCase"`. The response contains the full hidden case file (never rendered anywhere in the UI, not even in a debug view) plus the opening scene. Show a themed loading state while it runs (see section 6).
+4. **Investigation loop.** Each turn shows:
+   - The narration for the current scene, rendered as a typed case-file page.
+   - 3 to 5 tappable **lead cards** suggested by the GM (e.g. "Interrogate the widow," "Search the loading dock").
+   - A free-text input, always available: the detectives can type anything ("check her shoe size", "ping-call the burner"). Free text is a first-class action, not a fallback. This is what makes the game feel alive.
+   - A persistent **"Make an accusation"** button, always visible but visually secondary.
+   Selecting a lead or submitting text sends `type: "turn"` and appends the result.
+5. **Accusation.** A form with three fields: Killer (dropdown of suspect names + "Someone else" free text), Method (free text), Motive (free text). Confirm dialog: "Close the case? The DA only gives you one shot." Sends `type: "accusation"`.
+6. **Verdict screen.** The GM's verdict narration, a scorecard (Killer / Method / Motive each marked correct, partial, or missed), the full true solution, and an epilogue. Buttons: "New Case" and "Back to home." The finished game (title, date, detectives, score, solution) is appended to `cf-archive` and `cf-current-game` is cleared.
+
+Mode selection UI (Deduction vs Branching) should exist on the setup screen, but the Branching option is rendered disabled with a "Coming soon" tag. Do not implement it.
+
+## 4. State model
+
+`cf-current-game` (single JSON object):
+
+```json
+{
+  "version": 1,
+  "mode": "deduction",
+  "createdAt": "ISO",
+  "detectives": ["Nero", "Kenna"],
+  "caseFile": { /* hidden skeleton, verbatim from newCase, never displayed */ },
+  "recap": "GM-maintained running summary of the investigation so far",
+  "turns": [
+    { "role": "players", "action": "Walk the scene" },
+    { "role": "gm", "narration": "...", "leads": ["...", "..."] }
+  ],
+  "turnCount": 4,
+  "status": "active" | "solved"
+}
+```
+
+Context management: every `turn` request sends the hidden `caseFile`, the `recap`, and only the **last 6 turns** verbatim. The GM returns an updated `recap` each turn; store it. This keeps token cost flat no matter how long the case runs.
+
+## 5. Function API (`/.netlify/functions/gm`)
+
+`POST` JSON. Three request types. The function builds the messages from the prompt templates in section 7, calls the Anthropic API, parses the model's JSON (strip ```json fences defensively), and returns it. On parse failure, retry once with an appended instruction "Respond with valid JSON only"; on second failure return `{ error: "gm_failed" }` and the frontend shows a "Static on the radio, try again" state with a retry button that resends the same action.
+
+| type | payload in | response out |
+|---|---|---|
+| `newCase` | `{ detectives, flavor, customRequest }` | `{ caseFile, openingNarration, leads, recap }` |
+| `turn` | `{ caseFile, recap, recentTurns, action, detectives, turnCount }` | `{ narration, leads, recap }` |
+| `accusation` | `{ caseFile, recap, accusation: { killer, method, motive }, detectives }` | `{ verdictNarration, score: { killer, method, motive }, trueSolution, epilogue }` |
+
+`score` values: `"correct" | "partial" | "missed"`.
+
+## 6. Design direction
+
+Subject: a nighttime case file shared by two people on a video call. The UI should feel like evidence, not like an app.
+
+- **Palette:** `--ink #14161d` (app background), `--paper #efe8d8` (case-file pages), `--type #23201a` (text on paper), `--thread #b3382c` (evidence-board red: accents, the accusation button, stamps), `--pencil #8b8578` (secondary text, timestamps).
+- **Type:** display and case headers in a typewriter face (`Special Elite` or `Courier Prime` via Google Fonts) used with restraint; body narration in a quiet readable serif (`Source Serif 4`); UI labels in the typewriter face at small sizes, letterspaced, uppercase.
+- **Signature element:** every GM narration renders as a typed page clipped into the file: paper card, slightly rotated stamp reading `CASE 26-XXXX` in `--thread`, faint paper texture via CSS gradient only (no image assets). Lead cards look like index cards pinned below the page.
+- **Loading states:** typewriter-style text that types out, cycling short lines ("Dispatch is calling it in…", "Pulling the records…"). No spinners.
+- Dark app chrome around light paper pages. Motion minimal: pages fade-slide in, respect `prefers-reduced-motion`. Mobile-first at 380 px; it will mostly be played on phones.
+- Quality floor: keyboard focus visible, tap targets 44 px, text ≥ 16 px on paper.
+
+## 7. Game-master prompts
+
+These three templates live in the function. `{{placeholders}}` are interpolated. All three end by demanding raw JSON with no markdown fences and no text outside the JSON object.
+
+### 7.1 Case generation (`newCase`)
+
+```
+You are the case architect for a two-player detective game. Generate a complete,
+self-consistent crime case that will be narrated over many turns. The players
+never see this file; it is the hidden ground truth the narrator must obey.
+
+Detectives: {{det1}} and {{det2}}.
+Requested flavor: {{flavor}}. Player request to honor if present: "{{customRequest}}".
+
+Requirements:
+- Grounded and realistic. No supernatural elements. Adult tension is fine.
+- A victim, a setting with atmosphere, and exactly 4 or 5 suspects.
+- Exactly one culprit (an accomplice is allowed and encouraged sometimes).
+- Every suspect has: name, age, relation to victim, a real motive, a claimed
+  alibi, and a secret (which for innocents is unrelated to the murder).
+- A precise hidden timeline of the crime night, minute-level where it matters.
+- An evidence map of 8 to 12 clues: each has where it is found, what it truly
+  points to, and whether it is a red herring. At least 2 red herrings. Clues
+  must make the case FAIRLY solvable: a careful player following real clues
+  can identify killer, method, and motive.
+- One piece of physical evidence must contradict the killer's alibi.
+- A short opening dispatch scene (150-250 words) that ends with the situation
+  laid out and 4 initial leads. Write it in second person plural, present
+  tense, cinematic but concrete. Never address the real players, only the
+  detective characters.
+
+Respond with ONLY this JSON:
+{
+  "caseFile": {
+    "caseNumber": "26-XXXX",
+    "title": "",
+    "setting": "",
+    "victim": { "name": "", "age": 0, "description": "" },
+    "suspects": [ { "name": "", "age": 0, "relation": "", "motive": "",
+                    "alibi": "", "secret": "", "isCulprit": false } ],
+    "solution": { "killer": "", "accomplice": null, "method": "", "motive": "",
+                  "timeline": "" },
+    "evidenceMap": [ { "clue": "", "location": "", "pointsTo": "",
+                       "redHerring": false } ]
+  },
+  "openingNarration": "",
+  "leads": ["", "", "", ""],
+  "recap": "one-paragraph neutral summary of the setup"
+}
+```
+
+### 7.2 Turn narration (`turn`)
+
+```
+You are the game master narrating a detective case for two players sharing one
+screen: {{det1}} and {{det2}}. Below is the HIDDEN case file (ground truth you
+must never contradict and never reveal directly), a recap of the investigation
+so far, and the most recent turns.
+
+HIDDEN CASE FILE: {{caseFileJson}}
+RECAP: {{recap}}
+RECENT TURNS: {{recentTurnsJson}}
+TURN NUMBER: {{turnCount}}
+THE DETECTIVES NOW: {{action}}
+
+Rules:
+- Honor the action. If they interrogate someone, write the interrogation with
+  real dialogue. If they examine something, give concrete findings.
+- Stay strictly consistent with the case file. Innocents lie only about their
+  secrets. The culprit lies about the crime, and lies well.
+- Reveal clues gradually. Each turn should give real progress: at least one
+  concrete fact from the evidence map or timeline, surfaced naturally.
+- Never confirm or deny theories. Never name the culprit as such. If players
+  guess right mid-game, stay neutral and consistent.
+- If the action is something impossible or outside the world, deflect
+  in-fiction (a warrant is denied, records are sealed) and offer a nearby
+  alternative.
+- Escalate atmosphere as turnCount grows: after turn 10, the culprit may start
+  reacting to the pressure (covering tracks, a warning, a mistake).
+- 200-350 words of narration. Second person plural, present tense, concrete
+  and cinematic. End at a decision point, never resolve the case yourself.
+- Then propose 3 to 5 distinct leads: short imperative phrases, each a
+  genuinely different investigative direction, at least one pointing toward
+  un-touched evidence.
+- Update the recap: 120 words max, neutral, cover everything discovered so
+  far including this turn. The recap is your only long-term memory.
+
+Respond with ONLY this JSON:
+{ "narration": "", "leads": ["", "", ""], "recap": "" }
+```
+
+### 7.3 Accusation (`accusation`)
+
+```
+You are the game master resolving the final accusation of a detective case.
+
+HIDDEN CASE FILE: {{caseFileJson}}
+RECAP: {{recap}}
+DETECTIVES: {{det1}} and {{det2}}
+THEIR ACCUSATION: killer: {{killer}} | method: {{method}} | motive: {{motive}}
+
+Score each of the three parts against the solution:
+- "correct": right person / substantively right explanation.
+- "partial": right direction with a meaningful gap (e.g. right killer but
+  missed the accomplice; method mostly right but wrong weapon; motive adjacent
+  to the truth).
+- "missed": wrong.
+Judge meaning, not wording. Be generous with phrasing, strict with substance.
+
+Then write:
+- verdictNarration (250-400 words): the arrest or the aftermath, played out
+  cinematically. If they accused the wrong person, show the consequence: the
+  real culprit's reaction, the case going cold or cracking open late. Address
+  the detectives by name. Make a correct solve feel earned and a miss sting
+  honestly. Never mock the players.
+- trueSolution (concise): killer, accomplice if any, method, motive, and the
+  two or three clues that pointed there.
+- epilogue: 3 to 5 short lines on what happens to the people of the case
+  afterward.
+
+Respond with ONLY this JSON:
+{ "verdictNarration": "", "score": { "killer": "", "method": "", "motive": "" },
+  "trueSolution": "", "epilogue": "" }
+```
+
+## 8. Acceptance criteria (Stage 1 done means)
+
+1. New case generates in one call; hidden case file never appears in the DOM, console logs, or network responses beyond the function round-trip.
+2. Full loop playable on a phone: open case, 10+ turns mixing lead taps and free text, accusation, verdict, archive entry.
+3. Closing the tab mid-case and reopening resumes exactly where it was via "Continue Case."
+4. API key only in the Netlify env; frontend has zero secrets.
+5. GM JSON parse failures recover via the retry path without losing game state.
+6. Design implemented per section 6, including reduced-motion support.
+
+## 9. Out of scope for Stage 1
+
+Branching (Detroit) mode, audio narration, ElevenLabs, per-detective individual choices, hidden meters, multi-device sync, case sharing, accounts. Stage 2 adds Branching mode on this same engine; Stage 3 adds audio and polish.
