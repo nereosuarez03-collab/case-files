@@ -12,7 +12,7 @@ This document is the full brief for Stage 1. Build exactly this. Do not add feat
 - Hosting: Netlify with auto-deploy from GitHub `main`.
 - One Netlify Function (`netlify/functions/gm.js`) is the only backend. It holds the API key (env var `ANTHROPIC_API_KEY`) and proxies calls to the Anthropic API. The key must never reach the browser.
 - Persistence: localStorage only. Keys: `cf-settings`, `cf-current-game`, `cf-archive`. Never rename these later without a migration function.
-- Model: `claude-sonnet-4-6`. `max_tokens`: 2200 for the case skeleton, 1000 for the case opening, 1200 for turns, 1500 for accusation. Case generation is split across two calls to stay under the function platform's 60s invocation limit (see section 5).
+- Model: `claude-sonnet-4-6`. `max_tokens`: 1600 for the case skeleton, 1000 for the case opening, 1200 for turns, 1500 for accusation. Case generation is split across two calls to stay under the function platform's 60s invocation limit (see section 5). One Anthropic call per function invocation, no in-function retries — a slow retry inside the same invocation is what blows past the 60s limit, so recovery is the frontend's retry button, not a second attempt in gm.js.
 - Players: exactly two detectives sharing one screen (they are on a video call together). No accounts, no auth, no multiplayer sync.
 
 ## 2. Repo and files
@@ -69,7 +69,11 @@ Context management: every `turn` request sends the hidden `caseFile`, the `recap
 
 ## 5. Function API (`/.netlify/functions/gm`)
 
-`POST` JSON. Four request types. The function builds the messages from the prompt templates in section 7, calls the Anthropic API, parses the model's JSON (strip ```json fences defensively), and returns it. On parse failure, retry once with an appended instruction "Respond with valid JSON only"; on second failure return `{ error: "gm_failed" }` and the frontend shows a "Static on the radio, try again" state with a retry button that resends the same action.
+`POST` JSON. Four request types. The function builds the messages from the prompt templates in section 7, calls the Anthropic API once, and parses the model's JSON (strip ```json fences defensively). No in-function retries — one Anthropic call per invocation. The function logs the response's `stop_reason` on every call.
+
+Two failure modes, both returned as `{ error: "..." }` with the same frontend handling: a "Static on the radio, try again" state with a retry button that resends the same request.
+- `stop_reason === "max_tokens"`: the response was truncated before it could complete. Returned immediately as `{ error: "gm_truncated" }` without attempting to parse it — a truncated response can't produce valid JSON, so trying is wasted time against the 60s limit.
+- Anything else that isn't valid JSON, or a non-2xx from Anthropic: `{ error: "gm_failed" }`.
 
 New-case generation is split into two calls so neither exceeds the function platform's 60s invocation limit: `newCaseSkeleton` generates the hidden case file only (terse, information-dense fields — no prose), then `caseOpening` takes that case file and generates the narrated opening scene. The frontend runs them back to back under one continuous loading state and retries each independently — a failed `caseOpening` call resends only that request against the already-generated case file, it does not regenerate the skeleton.
 
@@ -109,18 +113,21 @@ Requested flavor: {{flavor}}. Player request to honor if present: "{{customReque
 
 Requirements:
 - Grounded and realistic. No supernatural elements. Adult tension is fine.
-- A victim, a setting with atmosphere, and exactly 4 or 5 suspects.
+- A victim, a setting with atmosphere, and exactly 4 suspects.
 - Exactly one culprit (an accomplice is allowed and encouraged sometimes).
 - Every suspect has: name, age, relation to victim, a real motive, a claimed
-  alibi, and a secret (which for innocents is unrelated to the murder).
-- A precise hidden timeline of the crime night, minute-level where it matters.
-- An evidence map of 8 to 12 clues: each has where it is found, what it truly
-  points to, and whether it is a red herring. At least 2 red herrings. Clues
-  must make the case FAIRLY solvable: a careful player following real clues
-  can identify killer, method, and motive.
+  alibi, and a secret (which for innocents is unrelated to the murder). Each
+  of those fields is one short sentence.
+- A hidden timeline of the crime night: 6 lines maximum, one line each,
+  minute-level where it matters.
+- An evidence map of exactly 8 clues: each has where it is found, what it
+  truly points to, and whether it is a red herring, one line each. At least
+  2 red herrings. Clues must make the case FAIRLY solvable: a careful player
+  following real clues can identify killer, method, and motive.
 - One piece of physical evidence must contradict the killer's alibi.
-- Keep every field terse and information-dense: this is a data file, not
-  prose. Timeline and evidence-map entries are one line each.
+- Every field in this JSON is terse and information-dense: one short
+  sentence each, no prose flourishes, no scene-setting language anywhere in
+  the case file. This is a data file, not narration.
 
 Respond with ONLY this JSON:
 {
