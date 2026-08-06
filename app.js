@@ -141,7 +141,7 @@ async function callGM(type, payload) {
 }
 
 function runRequest(type, payload, onSuccess) {
-  state.pendingRequest = { type, payload, onSuccess };
+  state.pendingRequest = { retry: () => runRequest(type, payload, onSuccess) };
   state.loadingKind = type;
   state.screen = 'loading';
   render();
@@ -159,8 +159,18 @@ function runRequest(type, payload, onSuccess) {
 
 function retryPending() {
   if (!state.pendingRequest) return;
-  const { type, payload, onSuccess } = state.pendingRequest;
-  runRequest(type, payload, onSuccess);
+  state.pendingRequest.retry();
+}
+
+// Puts the loading screen up (and starts its typewriter cycle) only if it
+// isn't already showing, so a chained request under the same loadingKind
+// doesn't reset the cycling lines mid-sequence.
+function ensureLoadingScreen(kind) {
+  state.loadingKind = kind;
+  if (state.screen !== 'loading') {
+    state.screen = 'loading';
+    render();
+  }
 }
 
 /* ---------- loading typewriter ---------- */
@@ -774,11 +784,11 @@ function onRootSubmit(e) {
     saveSettings({ detectives });
     state.settings = { detectives };
 
-    runRequest('newCase', {
+    runNewCaseSkeleton({
       detectives,
       flavor: f.flavor,
       customRequest: f.customRequest.trim(),
-    }, onNewCaseSuccess);
+    });
   } else if (action === 'submit-action-form') {
     const input = document.getElementById('action-input');
     const text = input ? input.value : '';
@@ -821,15 +831,52 @@ function onRootChange(e) {
   }
 }
 
-function onNewCaseSuccess(data) {
-  const f = state.setupForm;
-  const detectives = [f.det1.trim(), f.det2.trim()];
+// New-case generation is split into two calls to stay under the function
+// timeout: a terse caseFile skeleton, then the opening scene built from it.
+// Both run under one continuous loading screen (same loadingKind, so
+// ensureLoadingScreen doesn't restart the typewriter cycle between them).
+// Each step retries independently: a failed opening call re-sends only the
+// opening request against the already-generated caseFile, it doesn't
+// regenerate the skeleton.
+
+function runNewCaseSkeleton(payload) {
+  state.pendingRequest = { retry: () => runNewCaseSkeleton(payload) };
+  ensureLoadingScreen('newCase');
+
+  callGM('newCaseSkeleton', payload).then((data) => {
+    if (!data || data.error || !data.caseFile) {
+      stopLoadingCycle();
+      state.screen = 'error';
+      render();
+      return;
+    }
+    runCaseOpening(payload, data.caseFile);
+  });
+}
+
+function runCaseOpening(originalPayload, caseFile) {
+  state.pendingRequest = { retry: () => runCaseOpening(originalPayload, caseFile) };
+  ensureLoadingScreen('newCase');
+
+  const openingPayload = { caseFile, detectives: originalPayload.detectives };
+  callGM('caseOpening', openingPayload).then((data) => {
+    stopLoadingCycle();
+    if (!data || data.error) {
+      state.screen = 'error';
+      render();
+      return;
+    }
+    onCaseOpeningSuccess(data, caseFile, originalPayload);
+  });
+}
+
+function onCaseOpeningSuccess(data, caseFile, originalPayload) {
   const game = {
     version: 1,
     mode: 'deduction',
     createdAt: new Date().toISOString(),
-    detectives,
-    caseFile: data.caseFile,
+    detectives: originalPayload.detectives,
+    caseFile,
     recap: data.recap,
     turns: [{ role: 'gm', narration: data.openingNarration, leads: data.leads || [] }],
     turnCount: 0,
