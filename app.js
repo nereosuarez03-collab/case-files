@@ -126,6 +126,12 @@ let loadingTimer = null;
 
 /* ---------- GM network call ---------- */
 
+// gm.mjs streams back newline-delimited JSON: any number of
+// {"type":"progress"} keep-alive lines (ignored here — the loading screen's
+// own typewriter cycle is the UI, not this data), then exactly one
+// {"type":"result","payload":{...}} line before the stream closes. Buffering
+// and splitting on "\n" is safe even when the transport splits the NDJSON
+// across multiple chunks, since we only act once a full line is present.
 async function callGM(type, payload) {
   try {
     const res = await fetch('/.netlify/functions/gm', {
@@ -133,10 +139,41 @@ async function callGM(type, payload) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(Object.assign({ type }, payload)),
     });
-    const data = await res.json();
-    return data;
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let result = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      let newlineIndex;
+      while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, newlineIndex).trim();
+        buffer = buffer.slice(newlineIndex + 1);
+        const chunk = parseNdjsonLine(line);
+        if (chunk && chunk.type === 'result') result = chunk.payload;
+      }
+    }
+
+    const chunk = parseNdjsonLine(buffer.trim());
+    if (chunk && chunk.type === 'result') result = chunk.payload;
+
+    return result || { error: 'gm_failed' };
   } catch (e) {
     return { error: 'gm_failed' };
+  }
+}
+
+function parseNdjsonLine(line) {
+  if (!line) return null;
+  try {
+    return JSON.parse(line);
+  } catch (e) {
+    return null;
   }
 }
 
