@@ -12,7 +12,7 @@ This document is the full brief for Stage 1. Build exactly this. Do not add feat
 - Hosting: Netlify with auto-deploy from GitHub `main`.
 - One Netlify Function (`netlify/functions/gm.js`) is the only backend. It holds the API key (env var `ANTHROPIC_API_KEY`) and proxies calls to the Anthropic API. The key must never reach the browser.
 - Persistence: localStorage only. Keys: `cf-settings`, `cf-current-game`, `cf-archive`. Never rename these later without a migration function.
-- Model: `claude-sonnet-4-6`. `max_tokens`: 3000 for case generation, 1500 for turns, 1500 for accusation.
+- Model: `claude-sonnet-4-6`. `max_tokens`: 2200 for the case skeleton, 1000 for the case opening, 1200 for turns, 1500 for accusation. Case generation is split across two calls to stay under the function platform's 60s invocation limit (see section 5).
 - Players: exactly two detectives sharing one screen (they are on a video call together). No accounts, no auth, no multiplayer sync.
 
 ## 2. Repo and files
@@ -32,7 +32,7 @@ This document is the full brief for Stage 1. Build exactly this. Do not add feat
 
 1. **Home screen.** Logo, "New Case" button, "Continue Case" (if `cf-current-game` exists), "Archive" list of finished cases.
 2. **Setup screen.** Two name fields (Detective 1 / Detective 2, prefilled from `cf-settings` after first game). A "case flavor" selector: Murder / Disappearance / Heist / Surprise us. Optional free-text field: "Anything you want in this case?" Then "Open the case file."
-3. **Case generation.** One call to the function with `type: "newCase"`. The response contains the full hidden case file (never rendered anywhere in the UI, not even in a debug view) plus the opening scene. Show a themed loading state while it runs (see section 6).
+3. **Case generation.** Two calls to the function, back to back under one continuous loading state (see section 6): `type: "newCaseSkeleton"` generates the hidden case file, then `type: "caseOpening"` generates the opening scene from it. The case file is never rendered anywhere in the UI, not even in a debug view.
 4. **Investigation loop.** Each turn shows:
    - The narration for the current scene, rendered as a typed case-file page.
    - 3 to 5 tappable **lead cards** suggested by the GM (e.g. "Interrogate the widow," "Search the loading dock").
@@ -69,11 +69,14 @@ Context management: every `turn` request sends the hidden `caseFile`, the `recap
 
 ## 5. Function API (`/.netlify/functions/gm`)
 
-`POST` JSON. Three request types. The function builds the messages from the prompt templates in section 7, calls the Anthropic API, parses the model's JSON (strip ```json fences defensively), and returns it. On parse failure, retry once with an appended instruction "Respond with valid JSON only"; on second failure return `{ error: "gm_failed" }` and the frontend shows a "Static on the radio, try again" state with a retry button that resends the same action.
+`POST` JSON. Four request types. The function builds the messages from the prompt templates in section 7, calls the Anthropic API, parses the model's JSON (strip ```json fences defensively), and returns it. On parse failure, retry once with an appended instruction "Respond with valid JSON only"; on second failure return `{ error: "gm_failed" }` and the frontend shows a "Static on the radio, try again" state with a retry button that resends the same action.
+
+New-case generation is split into two calls so neither exceeds the function platform's 60s invocation limit: `newCaseSkeleton` generates the hidden case file only (terse, information-dense fields — no prose), then `caseOpening` takes that case file and generates the narrated opening scene. The frontend runs them back to back under one continuous loading state and retries each independently — a failed `caseOpening` call resends only that request against the already-generated case file, it does not regenerate the skeleton.
 
 | type | payload in | response out |
 |---|---|---|
-| `newCase` | `{ detectives, flavor, customRequest }` | `{ caseFile, openingNarration, leads, recap }` |
+| `newCaseSkeleton` | `{ detectives, flavor, customRequest }` | `{ caseFile }` |
+| `caseOpening` | `{ caseFile, detectives }` | `{ openingNarration, leads, recap }` |
 | `turn` | `{ caseFile, recap, recentTurns, action, detectives, turnCount }` | `{ narration, leads, recap }` |
 | `accusation` | `{ caseFile, recap, accusation: { killer, method, motive }, detectives }` | `{ verdictNarration, score: { killer, method, motive }, trueSolution, epilogue }` |
 
@@ -92,9 +95,9 @@ Subject: a nighttime case file shared by two people on a video call. The UI shou
 
 ## 7. Game-master prompts
 
-These three templates live in the function. `{{placeholders}}` are interpolated. All three end by demanding raw JSON with no markdown fences and no text outside the JSON object.
+These four templates live in the function. `{{placeholders}}` are interpolated. All four end by demanding raw JSON with no markdown fences and no text outside the JSON object.
 
-### 7.1 Case generation (`newCase`)
+### 7.1 Case skeleton (`newCaseSkeleton`)
 
 ```
 You are the case architect for a two-player detective game. Generate a complete,
@@ -116,10 +119,8 @@ Requirements:
   must make the case FAIRLY solvable: a careful player following real clues
   can identify killer, method, and motive.
 - One piece of physical evidence must contradict the killer's alibi.
-- A short opening dispatch scene (150-250 words) that ends with the situation
-  laid out and 4 initial leads. Write it in second person plural, present
-  tense, cinematic but concrete. Never address the real players, only the
-  detective characters.
+- Keep every field terse and information-dense: this is a data file, not
+  prose. Timeline and evidence-map entries are one line each.
 
 Respond with ONLY this JSON:
 {
@@ -134,14 +135,35 @@ Respond with ONLY this JSON:
                   "timeline": "" },
     "evidenceMap": [ { "clue": "", "location": "", "pointsTo": "",
                        "redHerring": false } ]
-  },
-  "openingNarration": "",
-  "leads": ["", "", "", ""],
-  "recap": "one-paragraph neutral summary of the setup"
+  }
 }
 ```
 
-### 7.2 Turn narration (`turn`)
+### 7.2 Case opening (`caseOpening`)
+
+```
+You are the game master opening a detective case for two players sharing one
+screen: {{det1}} and {{det2}}. Below is the HIDDEN case file (ground truth you
+must never contradict and never reveal directly).
+
+HIDDEN CASE FILE: {{caseFileJson}}
+
+Write a short opening dispatch scene (150-250 words) that lays out the
+situation and ends at a decision point. Write it in second person plural,
+present tense, cinematic but concrete. Never address the real players, only
+the detective characters.
+
+Then propose exactly 4 initial leads: short imperative phrases, each a
+genuinely different investigative direction.
+
+Then write a recap: one paragraph, neutral summary of the setup. This is the
+GM's only long-term memory of the case going forward.
+
+Respond with ONLY this JSON:
+{ "openingNarration": "", "leads": ["", "", "", ""], "recap": "" }
+```
+
+### 7.3 Turn narration (`turn`)
 
 ```
 You are the game master narrating a detective case for two players sharing one
@@ -181,7 +203,7 @@ Respond with ONLY this JSON:
 { "narration": "", "leads": ["", "", ""], "recap": "" }
 ```
 
-### 7.3 Accusation (`accusation`)
+### 7.4 Accusation (`accusation`)
 
 ```
 You are the game master resolving the final accusation of a detective case.

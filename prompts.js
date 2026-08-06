@@ -2,7 +2,7 @@
 // Exported as builder functions so gm.js can interpolate {{placeholders}}
 // without a template engine or build step.
 
-function buildNewCasePrompt({ det1, det2, flavor, customRequest }) {
+function buildNewCaseSkeletonPrompt({ det1, det2, flavor, customRequest }) {
   return `You are the case architect for a two-player detective game. Generate a complete,
 self-consistent crime case that will be narrated over many turns. The players
 never see this file; it is the hidden ground truth the narrator must obey.
@@ -22,10 +22,8 @@ Requirements:
   must make the case FAIRLY solvable: a careful player following real clues
   can identify killer, method, and motive.
 - One piece of physical evidence must contradict the killer's alibi.
-- A short opening dispatch scene (150-250 words) that ends with the situation
-  laid out and 4 initial leads. Write it in second person plural, present
-  tense, cinematic but concrete. Never address the real players, only the
-  detective characters.
+- Keep every field terse and information-dense: this is a data file, not
+  prose. Timeline and evidence-map entries are one line each.
 
 Respond with ONLY this JSON:
 {
@@ -40,11 +38,30 @@ Respond with ONLY this JSON:
                   "timeline": "" },
     "evidenceMap": [ { "clue": "", "location": "", "pointsTo": "",
                        "redHerring": false } ]
-  },
-  "openingNarration": "",
-  "leads": ["", "", "", ""],
-  "recap": "one-paragraph neutral summary of the setup"
+  }
 }`;
+}
+
+function buildCaseOpeningPrompt({ det1, det2, caseFileJson }) {
+  return `You are the game master opening a detective case for two players sharing one
+screen: ${det1} and ${det2}. Below is the HIDDEN case file (ground truth you
+must never contradict and never reveal directly).
+
+HIDDEN CASE FILE: ${caseFileJson}
+
+Write a short opening dispatch scene (150-250 words) that lays out the
+situation and ends at a decision point. Write it in second person plural,
+present tense, cinematic but concrete. Never address the real players, only
+the detective characters.
+
+Then propose exactly 4 initial leads: short imperative phrases, each a
+genuinely different investigative direction.
+
+Then write a recap: one paragraph, neutral summary of the setup. This is the
+GM's only long-term memory of the case going forward.
+
+Respond with ONLY this JSON:
+{ "openingNarration": "", "leads": ["", "", "", ""], "recap": "" }`;
 }
 
 function buildTurnPrompt({ det1, det2, caseFileJson, recap, recentTurnsJson, turnCount, action }) {
@@ -117,4 +134,9 @@ Respond with ONLY this JSON:
   "trueSolution": "", "epilogue": "" }`;
 }
 
-module.exports = { buildNewCasePrompt, buildTurnPrompt, buildAccusationPrompt };
+module.exports = {
+  buildNewCaseSkeletonPrompt,
+  buildCaseOpeningPrompt,
+  buildTurnPrompt,
+  buildAccusationPrompt,
+};

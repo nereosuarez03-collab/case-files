@@ -1,4 +1,9 @@
-const { buildNewCasePrompt, buildTurnPrompt, buildAccusationPrompt } = require('../../prompts.js');
+const {
+  buildNewCaseSkeletonPrompt,
+  buildCaseOpeningPrompt,
+  buildTurnPrompt,
+  buildAccusationPrompt,
+} = require('../../prompts.js');
 
 const MODEL = 'claude-sonnet-4-6';
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
@@ -20,15 +25,25 @@ exports.handler = async (event) => {
   let maxTokens;
 
   switch (body.type) {
-    case 'newCase': {
+    case 'newCaseSkeleton': {
       const { detectives = [], flavor, customRequest } = body;
-      prompt = buildNewCasePrompt({
+      prompt = buildNewCaseSkeletonPrompt({
         det1: detectives[0] || 'Detective One',
         det2: detectives[1] || 'Detective Two',
         flavor: flavor || 'Surprise us',
         customRequest: customRequest || '',
       });
-      maxTokens = 3000;
+      maxTokens = 2200;
+      break;
+    }
+    case 'caseOpening': {
+      const { caseFile, detectives = [] } = body;
+      prompt = buildCaseOpeningPrompt({
+        det1: detectives[0] || 'Detective One',
+        det2: detectives[1] || 'Detective Two',
+        caseFileJson: JSON.stringify(caseFile),
+      });
+      maxTokens = 1000;
       break;
     }
     case 'turn': {
@@ -42,7 +57,7 @@ exports.handler = async (event) => {
         turnCount,
         action: action || '',
       });
-      maxTokens = 1500;
+      maxTokens = 1200;
       break;
     }
     case 'accusation': {
@@ -93,6 +108,7 @@ async function callModelWithRetry(prompt, maxTokens) {
 }
 
 async function callModel(prompt, maxTokens) {
+  const startedAt = Date.now();
   const res = await fetch(ANTHROPIC_URL, {
     method: 'POST',
     headers: {
@@ -106,8 +122,12 @@ async function callModel(prompt, maxTokens) {
       messages: [{ role: 'user', content: prompt }],
     }),
   });
+  const elapsedMs = Date.now() - startedAt;
+  console.log(`anthropic response: status=${res.status} elapsedMs=${elapsedMs} maxTokens=${maxTokens}`);
 
   if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    console.error(`anthropic error body: ${errBody}`);
     throw new Error(`anthropic_error_${res.status}`);
   }
 
