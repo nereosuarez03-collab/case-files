@@ -410,6 +410,31 @@ a { color: inherit; }
   color: var(--type);
 }
 
+/* ---------- case clock ---------- */
+.clock-bar {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 0 2px 12px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid rgba(239, 232, 216, 0.1);
+  font-family: var(--font-type);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--pencil);
+}
+
+.clock-bar .clock-hours {
+  flex-shrink: 0;
+}
+
+.clock-bar.urgent {
+  color: var(--thread);
+}
+
 /* ---------- turn feed ---------- */
 .turn-feed {
   flex: 1;
