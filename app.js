@@ -84,17 +84,26 @@ function formatDate(iso) {
 
 const FLAVORS = ['Murder', 'Disappearance', 'Heist', 'Surprise us'];
 
-// Express/Full length choice on the setup screen maps to a decisionBudget
-// stored in game state and sent with every turn request, so the GM can
-// pace evidence reveal and convergence pressure against it (see section 7.3
-// of SPEC.md). Boundaries are the midpoint of each stated range.
-const DECISION_BUDGETS = { express: 11, full: 20 };
+// Express/Full length choice on the setup screen maps to an in-story case
+// clock budget (hours), stored in game state and sent with every turn
+// request so the GM can pace evidence reveal and end-game convergence
+// pressure against hours remaining rather than turn count (see SPEC.md
+// section 7.3).
+const CLOCK_BUDGETS = { express: 48, full: 72 };
 
-function computeAct(turnCount, decisionBudget) {
-  const progress = decisionBudget > 0 ? turnCount / decisionBudget : 0;
-  if (progress >= 0.8) return 'act3';
-  if (progress >= 1 / 3) return 'act2';
-  return 'act1';
+function computeAct(hoursRemaining, clockBudgetHours) {
+  if (hoursRemaining <= 12) return 'act3';
+  const elapsed = clockBudgetHours - hoursRemaining;
+  if (elapsed < clockBudgetHours / 3) return 'act1';
+  return 'act2';
+}
+
+function isClockExpired(game) {
+  return !!game && typeof game.clockBudgetHours === 'number' && (game.hoursElapsed || 0) >= game.clockBudgetHours;
+}
+
+function hoursRemainingFor(game) {
+  return Math.max(0, (game.clockBudgetHours || 0) - (game.hoursElapsed || 0));
 }
 
 const LOADING_LINES = {
@@ -416,6 +425,7 @@ function ensureSetupForm() {
       customRequest: '',
       mode: 'deduction',
       length: 'express',
+      tone: 'straight',
     };
   }
 }
@@ -445,15 +455,28 @@ function renderSetup() {
           </div>
         </div>
         <div class="field">
-          <span class="label">Length</span>
+          <span class="label">Duration</span>
           <div class="mode-toggle">
             <button type="button" class="mode-option" data-action="select-length" data-length="express" aria-pressed="${f.length === 'express'}">
               Express
-              <span class="option-hint">~10-12 decisions</span>
+              <span class="option-hint">48 hours</span>
             </button>
             <button type="button" class="mode-option" data-action="select-length" data-length="full" aria-pressed="${f.length === 'full'}">
               Full
-              <span class="option-hint">~18-22 decisions</span>
+              <span class="option-hint">72 hours</span>
+            </button>
+          </div>
+        </div>
+        <div class="field">
+          <span class="label">Tone</span>
+          <div class="mode-toggle">
+            <button type="button" class="mode-option" data-action="select-tone" data-tone="straight" aria-pressed="${f.tone === 'straight'}">
+              Straight
+              <span class="option-hint">grounded, default</span>
+            </button>
+            <button type="button" class="mode-option" data-action="select-tone" data-tone="dread" aria-pressed="${f.tone === 'dread'}">
+              Dread
+              <span class="option-hint">isolation, restraint</span>
             </button>
           </div>
         </div>
@@ -511,6 +534,17 @@ function turnEntryHtml(t, game) {
   `;
 }
 
+function renderClockBar(game) {
+  const hoursLeft = hoursRemainingFor(game);
+  const urgent = hoursLeft <= 12;
+  return `
+    <div class="clock-bar${urgent ? ' urgent' : ''}">
+      <span>${esc(game.currentTime || '')}</span>
+      <span class="clock-hours">${hoursLeft}h left</span>
+    </div>
+  `;
+}
+
 function renderGame() {
   const game = state.currentGame;
   if (!game) {
@@ -541,6 +575,7 @@ function renderGame() {
 
   return `
     <div class="game-screen" style="display:flex;flex-direction:column;flex:1;min-height:0;">
+      ${renderClockBar(game)}
       <div class="turn-feed" id="turn-feed">
         ${feedHtml}
         ${streamingHtml}
@@ -575,8 +610,8 @@ function submitAction(actionText) {
 
   const recentTurns = game.turns.slice(-6);
   const turnCount = (game.turnCount || 0) + 1;
-  const decisionBudget = game.decisionBudget || DECISION_BUDGETS.full;
-  const currentAct = computeAct(turnCount, decisionBudget);
+  const hoursRemaining = hoursRemainingFor(game);
+  const currentAct = computeAct(hoursRemaining, game.clockBudgetHours || CLOCK_BUDGETS.full);
 
   game.turns.push({ role: 'players', action: text });
   saveCurrentGame(game);
@@ -588,8 +623,10 @@ function submitAction(actionText) {
     action: text,
     detectives: game.detectives,
     turnCount,
-    decisionBudget,
+    clockBudgetHours: game.clockBudgetHours,
+    hoursRemaining,
     currentAct,
+    tone: game.tone,
   }, turnCount);
 }
 
@@ -636,8 +673,21 @@ function onTurnSuccess(data, turnCount) {
   game.turns.push({ role: 'gm', narration: data.narration, leads: data.leads || [] });
   game.recap = data.recap || game.recap;
   game.turnCount = turnCount;
+  game.hoursElapsed = (game.hoursElapsed || 0) + (Number(data.hoursSpent) || 0);
+  game.currentTime = data.currentTime || game.currentTime;
   saveCurrentGame(game);
-  state.screen = 'game';
+
+  // The clock running out forces the case to resolution: the deadlineEvent
+  // just happened in the narration above, so skip the normal game screen
+  // (with its now-moot leads) and go straight to the accusation form, which
+  // shows that same final narration inline before the fields — see
+  // renderAccusationForm.
+  if (isClockExpired(game)) {
+    state.accusationForm = null;
+    state.screen = 'accusationForm';
+  } else {
+    state.screen = 'game';
+  }
   render();
 }
 
@@ -654,11 +704,20 @@ function renderAccusationForm() {
   const game = state.currentGame;
   const f = state.accusationForm;
   const suspects = (game.caseFile.suspects || []).map((s) => s.name).filter(Boolean);
+  const expired = isClockExpired(game);
+  const lastGmTurn = expired ? [...game.turns].reverse().find((t) => t.role === 'gm') : null;
 
   return `
     <div class="accusation-form">
-      <span class="back-link" data-action="back-to-game">&larr; Back to the case</span>
+      ${expired ? '' : '<span class="back-link" data-action="back-to-game">&larr; Back to the case</span>'}
       <div class="screen-header"><h1>Make an Accusation</h1></div>
+      ${expired && lastGmTurn ? `
+        <div class="case-page">
+          <span class="stamp">Case ${esc(game.caseFile.caseNumber || '')}</span>
+          <p class="narration">${esc(lastGmTurn.narration)}</p>
+        </div>
+        <p class="empty-note" style="text-align:left;font-style:normal;padding:10px 0 4px;">The clock ran out. Time to close the case.</p>
+      ` : ''}
       <form id="accusation-form" data-action="submit-accusation-form">
         <div class="field">
           <label class="label" for="killer-select">Killer</label>
@@ -903,7 +962,7 @@ function onRootClick(e) {
       break;
     case 'continue-case':
       state.currentGame = loadCurrentGame();
-      state.screen = 'game';
+      state.screen = isClockExpired(state.currentGame) ? 'accusationForm' : 'game';
       render();
       break;
     case 'open-archive':
@@ -928,6 +987,11 @@ function onRootClick(e) {
     case 'select-length':
       ensureSetupForm();
       state.setupForm.length = el.dataset.length;
+      render();
+      break;
+    case 'select-tone':
+      ensureSetupForm();
+      state.setupForm.tone = el.dataset.tone;
       render();
       break;
     case 'select-lead': {
@@ -1006,6 +1070,7 @@ function onRootSubmit(e) {
     runNewCaseSkeleton({
       detectives,
       flavor: f.flavor,
+      tone: f.tone,
       customRequest: f.customRequest.trim(),
       length: f.length,
     });
@@ -1080,7 +1145,7 @@ function runNewCaseSkeleton(payload) {
 }
 
 function runCaseOpening(originalPayload, caseFile) {
-  const openingPayload = { caseFile, detectives: originalPayload.detectives };
+  const openingPayload = { caseFile, detectives: originalPayload.detectives, tone: originalPayload.tone };
   runStreamingRequest(
     'caseOpening',
     openingPayload,
@@ -1095,7 +1160,10 @@ function onCaseOpeningSuccess(data, caseFile, originalPayload) {
     mode: 'deduction',
     createdAt: new Date().toISOString(),
     detectives: originalPayload.detectives,
-    decisionBudget: DECISION_BUDGETS[originalPayload.length] || DECISION_BUDGETS.express,
+    clockBudgetHours: CLOCK_BUDGETS[originalPayload.length] || CLOCK_BUDGETS.express,
+    hoursElapsed: 0,
+    currentTime: caseFile.caseStart || '',
+    tone: originalPayload.tone || 'straight',
     caseFile,
     recap: data.recap,
     turns: [{ role: 'gm', narration: data.openingNarration, leads: data.leads || [] }],
