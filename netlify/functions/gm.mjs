@@ -36,11 +36,12 @@ export default async (req) => {
 
   switch (body.type) {
     case 'newCaseSkeleton': {
-      const { detectives = [], flavor, customRequest } = body;
+      const { detectives = [], flavor, tone, customRequest } = body;
       prompt = buildNewCaseSkeletonPrompt({
         det1: detectives[0] || 'Detective One',
         det2: detectives[1] || 'Detective Two',
         flavor: flavor || 'Surprise us',
+        tone: tone || 'straight',
         customRequest: customRequest || '',
       });
       maxTokens = 2800;
@@ -48,18 +49,22 @@ export default async (req) => {
       break;
     }
     case 'caseOpening': {
-      const { caseFile, detectives = [] } = body;
+      const { caseFile, detectives = [], tone } = body;
       prompt = buildCaseOpeningPrompt({
         det1: detectives[0] || 'Detective One',
         det2: detectives[1] || 'Detective Two',
         caseFileJson: JSON.stringify(caseFile),
+        tone: tone || 'straight',
       });
       maxTokens = 1000;
       narrationField = 'openingNarration';
       break;
     }
     case 'turn': {
-      const { caseFile, recap, recentTurns, action, detectives = [], turnCount, decisionBudget = 20, currentAct = 'act1' } = body;
+      const {
+        caseFile, recap, recentTurns, action, detectives = [], turnCount,
+        clockBudgetHours = 48, hoursRemaining, currentAct = 'act1', tone,
+      } = body;
       prompt = buildTurnPrompt({
         det1: detectives[0] || 'Detective One',
         det2: detectives[1] || 'Detective Two',
@@ -67,8 +72,10 @@ export default async (req) => {
         recap: recap || '',
         recentTurnsJson: JSON.stringify(recentTurns || []),
         turnCount,
-        decisionBudget,
+        clockBudgetHours,
+        hoursRemaining: hoursRemaining != null ? hoursRemaining : clockBudgetHours,
         currentAct,
+        tone: tone || 'straight',
         action: action || '',
       });
       maxTokens = 1200;
