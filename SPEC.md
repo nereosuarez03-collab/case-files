@@ -10,9 +10,9 @@ This document is the full brief for Stage 1. Build exactly this. Do not add feat
 
 - Vanilla HTML, CSS, JS. Single-page PWA. No frameworks, no build step.
 - Hosting: Netlify with auto-deploy from GitHub `main`.
-- One Netlify Function (`netlify/functions/gm.js`) is the only backend. It holds the API key (env var `ANTHROPIC_API_KEY`) and proxies calls to the Anthropic API. The key must never reach the browser.
+- One Netlify Function (`netlify/functions/gm.mjs`) is the only backend. It holds the API key (env var `ANTHROPIC_API_KEY`) and proxies calls to the Anthropic API. The key must never reach the browser. It is a Netlify Functions v2 streaming function (ESM `export default`, returns a `Response` whose body is a `ReadableStream`) — the open connection is what lets a slow generation run past the platform's synchronous invocation limit instead of being killed mid-response (see section 5).
 - Persistence: localStorage only. Keys: `cf-settings`, `cf-current-game`, `cf-archive`. Never rename these later without a migration function.
-- Model: `claude-sonnet-4-6`. `max_tokens`: 1600 for the case skeleton, 1000 for the case opening, 1200 for turns, 1500 for accusation. Case generation is split across two calls to stay under the function platform's 60s invocation limit (see section 5). One Anthropic call per function invocation, no in-function retries — a slow retry inside the same invocation is what blows past the 60s limit, so recovery is the frontend's retry button, not a second attempt in gm.js.
+- Model: `claude-sonnet-4-6`. `max_tokens`: 2800 for the case skeleton, 1000 for the case opening, 1200 for turns, 1500 for accusation. Case generation stays split across two calls (see section 5) even though streaming removes the invocation-length ceiling, because each call is still a separate, independently-retryable unit of work. One Anthropic call per function invocation, no in-function retries — recovery is the frontend's retry button, not a second attempt in gm.mjs.
 - Players: exactly two detectives sharing one screen (they are on a video call together). No accounts, no auth, no multiplayer sync.
 
 ## 2. Repo and files
@@ -21,8 +21,8 @@ This document is the full brief for Stage 1. Build exactly this. Do not add feat
 /index.html
 /style.css
 /app.js
-/prompts.js          <- exports the three prompt templates (section 7), imported by gm.js at build via functions bundling or duplicated verbatim
-/netlify/functions/gm.js
+/prompts.js          <- exports the four prompt templates (section 7); CommonJS, pulled into gm.mjs via createRequire
+/netlify/functions/gm.mjs
 /manifest.webmanifest
 /icons/
 /netlify.toml
@@ -69,13 +69,17 @@ Context management: every `turn` request sends the hidden `caseFile`, the `recap
 
 ## 5. Function API (`/.netlify/functions/gm`)
 
-`POST` JSON. Four request types. The function builds the messages from the prompt templates in section 7, calls the Anthropic API once, and parses the model's JSON (strip ```json fences defensively). No in-function retries — one Anthropic call per invocation. The function logs the response's `stop_reason` on every call.
+`POST` JSON, always answered with a streamed `Response` (`content-type: application/x-ndjson`), even for fast calls — the frontend's reader loop is the only consumer, so there's one code path regardless of how long generation takes. Four request types. The function builds the prompt from the templates in section 7, and calls the Anthropic API once with `stream: true`. No in-function retries — one Anthropic call per invocation. The function logs `elapsedMs` and the response's `stop_reason` on every call, and the raw error body on a non-2xx or a mid-stream `error` event.
 
-Two failure modes, both returned as `{ error: "..." }` with the same frontend handling: a "Static on the radio, try again" state with a retry button that resends the same request.
-- `stop_reason === "max_tokens"`: the response was truncated before it could complete. Returned immediately as `{ error: "gm_truncated" }` without attempting to parse it — a truncated response can't produce valid JSON, so trying is wasted time against the 60s limit.
-- Anything else that isn't valid JSON, or a non-2xx from Anthropic: `{ error: "gm_failed" }`.
+**Response body (NDJSON).** Each line is one JSON object, newline-terminated:
+- `{ "type": "progress" }` — written on every streamed text delta from Anthropic while generation is in flight. Purely a keep-alive / liveness signal; the frontend ignores the contents and reads it only to know a line boundary was crossed. This is what keeps the connection alive past the platform's synchronous invocation limit — bytes keep flowing instead of the function going silent until it returns.
+- `{ "type": "result", "payload": {...} }` — written exactly once, as the last line, immediately before the stream closes. `payload` is either the successful response shape from the table below, or one of the two error shapes.
 
-New-case generation is split into two calls so neither exceeds the function platform's 60s invocation limit: `newCaseSkeleton` generates the hidden case file only (terse, information-dense fields — no prose), then `caseOpening` takes that case file and generates the narrated opening scene. The frontend runs them back to back under one continuous loading state and retries each independently — a failed `caseOpening` call resends only that request against the already-generated case file, it does not regenerate the skeleton.
+Two failure modes, both delivered as a `result` line with `payload: { error: "..." }`, and both given the same frontend handling: a "Static on the radio, try again" state with a retry button that resends the same request.
+- `stop_reason === "max_tokens"`: the response was truncated before it could complete. Delivered as `{ error: "gm_truncated" }` without attempting to parse the accumulated text — a truncated response can't reliably produce valid JSON (and, per the case below, isn't trusted even if it happens to), so trying is wasted work.
+- Anything else that isn't valid JSON once the stream completes, a non-2xx from Anthropic, or a mid-stream SSE `error` event: `{ error: "gm_failed" }`.
+
+New-case generation is split into two calls, independent of the streaming transport: `newCaseSkeleton` generates the hidden case file only (terse, information-dense fields — no prose), then `caseOpening` takes that case file and generates the narrated opening scene. The frontend runs them back to back under one continuous loading state and retries each independently — a failed `caseOpening` call resends only that request against the already-generated case file, it does not regenerate the skeleton.
 
 | type | payload in | response out |
 |---|---|---|
