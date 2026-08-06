@@ -21,8 +21,10 @@ This document is the full brief for Stage 1. Build exactly this. Do not add feat
 /index.html
 /style.css
 /app.js
-/prompts.js          <- exports the four prompt templates (section 7); CommonJS, pulled into gm.mjs via createRequire
 /netlify/functions/gm.mjs
+/netlify/functions/prompts.mjs   <- exports the four prompt templates (section 7); lives next to gm.mjs
+                                     because Netlify bundles each function in isolation — a relative
+                                     import can't reach outside its own function's directory
 /manifest.webmanifest
 /icons/
 /netlify.toml

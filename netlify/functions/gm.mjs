@@ -1,14 +1,13 @@
-import { createRequire } from 'module';
-
-// prompts.js stays CommonJS (it has no other consumer); createRequire is the
-// standard Node interop for pulling a CJS module into an ESM function.
-const require = createRequire(import.meta.url);
-const {
+// Same-directory import: Netlify bundles each function in isolation, so a
+// parent-directory relative import (the old '../../prompts.js') is not
+// reachable at runtime — only files under netlify/functions/ get packaged
+// with the function.
+import {
   buildNewCaseSkeletonPrompt,
   buildCaseOpeningPrompt,
   buildTurnPrompt,
   buildAccusationPrompt,
-} = require('../../prompts.js');
+} from './prompts.mjs';
 
 const MODEL = 'claude-sonnet-4-6';
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
