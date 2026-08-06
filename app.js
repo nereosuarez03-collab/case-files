@@ -84,6 +84,19 @@ function formatDate(iso) {
 
 const FLAVORS = ['Murder', 'Disappearance', 'Heist', 'Surprise us'];
 
+// Express/Full length choice on the setup screen maps to a decisionBudget
+// stored in game state and sent with every turn request, so the GM can
+// pace evidence reveal and convergence pressure against it (see section 7.3
+// of SPEC.md). Boundaries are the midpoint of each stated range.
+const DECISION_BUDGETS = { express: 11, full: 20 };
+
+function computeAct(turnCount, decisionBudget) {
+  const progress = decisionBudget > 0 ? turnCount / decisionBudget : 0;
+  if (progress >= 0.8) return 'act3';
+  if (progress >= 1 / 3) return 'act2';
+  return 'act1';
+}
+
 const LOADING_LINES = {
   newCase: [
     'Dispatch is calling it in…',
@@ -108,7 +121,7 @@ const LOADING_LINES = {
 /* ---------- state ---------- */
 
 const state = {
-  screen: 'home', // home | setup | loading | game | accusationForm | verdict | archive | archiveDetail | error
+  screen: 'home', // home | setup | loading | streaming | game | accusationForm | verdict | archive | archiveDetail | error
   settings: loadSettings(),
   currentGame: loadCurrentGame(),
   archive: loadArchive(),
@@ -117,8 +130,10 @@ const state = {
   confirmDialog: false,
   lastVerdict: null,
   archiveDetailIndex: null,
-  pendingRequest: null, // { type, payload, onSuccess }
+  pendingRequest: null, // { retry }
   loadingKind: 'newCase',
+  streamingText: '', // standalone 'streaming' screen text (caseOpening / accusation)
+  streamingTurn: null, // inline turn streaming: { text, phase: 'loading' | 'streaming' }
 };
 
 const root = document.getElementById('screen-root');
@@ -127,12 +142,16 @@ let loadingTimer = null;
 /* ---------- GM network call ---------- */
 
 // gm.mjs streams back newline-delimited JSON: any number of
-// {"type":"progress"} keep-alive lines (ignored here — the loading screen's
-// own typewriter cycle is the UI, not this data), then exactly one
-// {"type":"result","payload":{...}} line before the stream closes. Buffering
-// and splitting on "\n" is safe even when the transport splits the NDJSON
-// across multiple chunks, since we only act once a full line is present.
-async function callGM(type, payload) {
+// {"type":"progress"} keep-alive lines (ignored — pure liveness signal),
+// any number of {"type":"narration-delta","text":"..."} lines carrying
+// plain-text prose as it's decoded server-side out of the streaming JSON
+// (forwarded to onNarrationDelta if provided; not every request type has
+// one — newCaseSkeleton never does), then exactly one
+// {"type":"result","payload":{...}} line before the stream closes.
+// Buffering and splitting on "\n" is safe even when the transport splits
+// the NDJSON across multiple chunks, since we only act once a full line is
+// present.
+async function callGM(type, payload, onNarrationDelta) {
   try {
     const res = await fetch('/.netlify/functions/gm', {
       method: 'POST',
@@ -145,6 +164,13 @@ async function callGM(type, payload) {
     let buffer = '';
     let result = null;
 
+    const handleLine = (line) => {
+      const chunk = parseNdjsonLine(line);
+      if (!chunk) return;
+      if (chunk.type === 'result') result = chunk.payload;
+      else if (chunk.type === 'narration-delta' && onNarrationDelta) onNarrationDelta(chunk.text || '');
+    };
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -154,13 +180,11 @@ async function callGM(type, payload) {
       while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
         const line = buffer.slice(0, newlineIndex).trim();
         buffer = buffer.slice(newlineIndex + 1);
-        const chunk = parseNdjsonLine(line);
-        if (chunk && chunk.type === 'result') result = chunk.payload;
+        handleLine(line);
       }
     }
 
-    const chunk = parseNdjsonLine(buffer.trim());
-    if (chunk && chunk.type === 'result') result = chunk.payload;
+    handleLine(buffer.trim());
 
     return result || { error: 'gm_failed' };
   } catch (e) {
@@ -177,13 +201,35 @@ function parseNdjsonLine(line) {
   }
 }
 
-function runRequest(type, payload, onSuccess) {
-  state.pendingRequest = { retry: () => runRequest(type, payload, onSuccess) };
-  state.loadingKind = type;
-  state.screen = 'loading';
-  render();
+// Used by requests whose narration has nowhere existing to render inline
+// (caseOpening: the game doesn't exist yet; accusation: the verdict screen's
+// scorecard/solution/epilogue aren't available until the full envelope
+// arrives). Shows the usual full-screen loading typewriter until the first
+// narration delta arrives, then swaps to a standalone 'streaming' screen
+// that grows the text into a case-page live. `loadingKind` lets a caller
+// (case opening, chained after the skeleton call) keep the same loading
+// label/lines as an earlier step instead of restarting them — defaults to
+// `type` itself.
+function runStreamingRequest(type, payload, onSuccess, loadingKind) {
+  state.pendingRequest = { retry: () => runStreamingRequest(type, payload, onSuccess, loadingKind) };
+  state.streamingText = '';
+  ensureLoadingScreen(loadingKind || type);
 
-  callGM(type, payload).then((data) => {
+  let switchedToStreaming = false;
+  const onNarrationDelta = (deltaText) => {
+    if (!switchedToStreaming) {
+      switchedToStreaming = true;
+      stopLoadingCycle();
+      state.screen = 'streaming';
+      render();
+    }
+    state.streamingText += deltaText;
+    const el = document.getElementById('streaming-text');
+    if (el) el.textContent = state.streamingText;
+    else render();
+  };
+
+  callGM(type, payload, onNarrationDelta).then((data) => {
     stopLoadingCycle();
     if (!data || data.error) {
       state.screen = 'error';
@@ -271,9 +317,12 @@ function render() {
       root.innerHTML = renderLoading();
       startLoadingCycle(LOADING_LINES[state.loadingKind] || LOADING_LINES.turn);
       break;
+    case 'streaming':
+      root.innerHTML = renderStreamingPage();
+      break;
     case 'game':
       root.innerHTML = renderGame();
-      scrollFeedToBottom();
+      scrollToNewestPage();
       break;
     case 'accusationForm':
       root.innerHTML = renderAccusationForm();
@@ -298,9 +347,41 @@ function render() {
   }
 }
 
-function scrollFeedToBottom() {
+function prefersReducedMotion() {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+// Scrolls to the top of the newest case-page (the latest GM turn, or the
+// in-progress streaming placeholder while one is showing) rather than to
+// the bottom of the feed — landing the reader at the start of the new page,
+// not past its leads or mid-page.
+function scrollToNewestPage() {
   const feed = document.getElementById('turn-feed');
-  if (feed) feed.scrollTop = feed.scrollHeight;
+  if (!feed) return;
+  const pages = feed.querySelectorAll('.case-page');
+  const last = pages[pages.length - 1];
+  if (last) {
+    last.scrollIntoView({ block: 'start', behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
+  } else {
+    feed.scrollTop = feed.scrollHeight;
+  }
+}
+
+// Standalone full-screen version of the "watch the page get typed" render,
+// used where there's no existing screen content to embed a live narration
+// into yet: caseOpening (the game doesn't exist until this completes) and
+// accusation (the verdict screen's scorecard/solution/epilogue aren't known
+// until the full envelope arrives).
+function renderStreamingPage() {
+  const caseNumber = state.currentGame && state.currentGame.caseFile ? state.currentGame.caseFile.caseNumber : '';
+  return `
+    <div class="turn-feed" style="flex:1;">
+      <div class="case-page">
+        <span class="stamp">${caseNumber ? `Case ${esc(caseNumber)}` : 'Case File'}</span>
+        <p class="narration"><span id="streaming-text"></span><span class="cursor">&nbsp;</span></p>
+      </div>
+    </div>
+  `;
 }
 
 /* ---------- HOME ---------- */
@@ -334,6 +415,7 @@ function ensureSetupForm() {
       flavor: 'Surprise us',
       customRequest: '',
       mode: 'deduction',
+      length: 'express',
     };
   }
 }
@@ -360,6 +442,19 @@ function renderSetup() {
             ${FLAVORS.map((flav) => `
               <button type="button" class="flavor-card" data-action="select-flavor" data-flavor="${esc(flav)}" aria-pressed="${f.flavor === flav}">${esc(flav)}</button>
             `).join('')}
+          </div>
+        </div>
+        <div class="field">
+          <span class="label">Length</span>
+          <div class="mode-toggle">
+            <button type="button" class="mode-option" data-action="select-length" data-length="express" aria-pressed="${f.length === 'express'}">
+              Express
+              <span class="option-hint">~10-12 decisions</span>
+            </button>
+            <button type="button" class="mode-option" data-action="select-length" data-length="full" aria-pressed="${f.length === 'full'}">
+              Full
+              <span class="option-hint">~18-22 decisions</span>
+            </button>
           </div>
         </div>
         <div class="field">
@@ -395,50 +490,72 @@ function renderLoading() {
 
 /* ---------- GAME (investigation loop) ---------- */
 
+function turnEntryHtml(t, game) {
+  if (t.role === 'gm') {
+    return `
+      <div class="turn-entry">
+        <div class="case-page">
+          <span class="stamp">Case ${esc(game.caseFile.caseNumber || '')}</span>
+          <p class="narration">${esc(t.narration)}</p>
+        </div>
+      </div>
+    `;
+  }
+  return `
+    <div class="turn-entry">
+      <div class="player-note">
+        <span class="who">${esc(game.detectives.join(' & '))}</span>
+        ${esc(t.action)}
+      </div>
+    </div>
+  `;
+}
+
 function renderGame() {
   const game = state.currentGame;
   if (!game) {
     state.screen = 'home';
     return renderHome();
   }
-  const lastGmTurn = [...game.turns].reverse().find((t) => t.role === 'gm');
-  const leads = lastGmTurn && Array.isArray(lastGmTurn.leads) ? lastGmTurn.leads : [];
+  const streaming = state.streamingTurn;
+  const lastGmTurn = !streaming && [...game.turns].reverse().find((t) => t.role === 'gm');
+  const leads = !streaming && lastGmTurn && Array.isArray(lastGmTurn.leads) ? lastGmTurn.leads : [];
 
-  const feedHtml = game.turns.map((t) => {
-    if (t.role === 'gm') {
-      return `
-        <div class="turn-entry">
-          <div class="case-page">
-            <span class="stamp">Case ${esc(game.caseFile.caseNumber || '')}</span>
-            <p class="narration">${esc(t.narration)}</p>
-          </div>
-        </div>
-      `;
-    }
-    return `
-      <div class="turn-entry">
-        <div class="player-note">
-          <span class="who">${esc(game.detectives.join(' & '))}</span>
-          ${esc(t.action)}
-        </div>
+  const feedHtml = game.turns.map((t) => turnEntryHtml(t, game)).join('');
+
+  // While the GM's response is in flight, a placeholder card sits where the
+  // next page will land: the loading typewriter until the first narration
+  // delta arrives, then the growing text itself — reusing #loading-line-text
+  // and #streaming-text the same way the full-screen loading/streaming
+  // screens do, so startLoadingCycle() and the delta handler work unchanged.
+  const streamingHtml = streaming ? `
+    <div class="turn-entry">
+      <div class="case-page">
+        <span class="stamp">Case ${esc(game.caseFile.caseNumber || '')}</span>
+        ${streaming.phase === 'loading'
+          ? `<div class="loading-line"><span id="loading-line-text"></span><span class="cursor">&nbsp;</span></div>`
+          : `<p class="narration"><span id="streaming-text">${esc(streaming.text)}</span><span class="cursor">&nbsp;</span></p>`}
       </div>
-    `;
-  }).join('');
+    </div>
+  ` : '';
 
   return `
     <div class="game-screen" style="display:flex;flex-direction:column;flex:1;min-height:0;">
       <div class="turn-feed" id="turn-feed">
         ${feedHtml}
-        <div class="leads">
-          ${leads.map((lead, i) => `<button class="lead-card" data-action="select-lead" data-lead-index="${i}">${esc(lead)}</button>`).join('')}
-        </div>
+        ${streamingHtml}
+        ${!streaming ? `
+          <div class="leads">
+            ${leads.map((lead, i) => `<button class="lead-card" data-action="select-lead" data-lead-index="${i}">${esc(lead)}</button>`).join('')}
+          </div>
+        ` : ''}
       </div>
       <form class="action-bar" data-action="submit-action-form">
-        <input class="input" id="action-input" placeholder="What do you do?" autocomplete="off" maxlength="300">
-        <button type="submit" class="btn btn-primary send">Go</button>
+        <input class="input" id="action-input" placeholder="What do you do?" autocomplete="off" maxlength="300" ${streaming ? 'disabled' : ''}>
+        <button type="submit" class="btn btn-primary send" ${streaming ? 'disabled' : ''}>Go</button>
       </form>
       <div class="accusation-bar">
-        <button class="accusation-btn" data-action="open-accusation">Make an Accusation</button>
+        <button class="accusation-btn" data-action="open-accusation" ${streaming ? 'disabled' : ''}>Make an Accusation</button>
       </div>
     </div>
   `;
@@ -446,7 +563,7 @@ function renderGame() {
 
 function currentLeads() {
   const game = state.currentGame;
-  if (!game) return [];
+  if (!game || state.streamingTurn) return [];
   const lastGmTurn = [...game.turns].reverse().find((t) => t.role === 'gm');
   return lastGmTurn && Array.isArray(lastGmTurn.leads) ? lastGmTurn.leads : [];
 }
@@ -454,22 +571,64 @@ function currentLeads() {
 function submitAction(actionText) {
   const text = (actionText || '').trim();
   const game = state.currentGame;
-  if (!text || !game) return;
+  if (!text || !game || state.streamingTurn) return;
 
   const recentTurns = game.turns.slice(-6);
   const turnCount = (game.turnCount || 0) + 1;
+  const decisionBudget = game.decisionBudget || DECISION_BUDGETS.full;
+  const currentAct = computeAct(turnCount, decisionBudget);
 
   game.turns.push({ role: 'players', action: text });
   saveCurrentGame(game);
 
-  runRequest('turn', {
+  runTurnRequest({
     caseFile: game.caseFile,
     recap: game.recap,
     recentTurns,
     action: text,
     detectives: game.detectives,
     turnCount,
-  }, (data) => onTurnSuccess(data, turnCount));
+    decisionBudget,
+    currentAct,
+  }, turnCount);
+}
+
+// Turn requests stream inline into the game screen (unlike caseOpening and
+// accusation, which use the standalone 'streaming' screen) so the player's
+// just-submitted action stays visible as a compact marker while the next
+// page arrives — "you chose X, now watch the response" rather than cutting
+// away to a generic loading takeover.
+function runTurnRequest(payload, turnCount) {
+  state.pendingRequest = { retry: () => runTurnRequest(payload, turnCount) };
+  state.streamingTurn = { text: '', phase: 'loading' };
+  state.screen = 'game';
+  render();
+  startLoadingCycle(LOADING_LINES.turn);
+
+  let switchedToStreaming = false;
+  const onNarrationDelta = (deltaText) => {
+    if (!switchedToStreaming) {
+      switchedToStreaming = true;
+      stopLoadingCycle();
+      state.streamingTurn.phase = 'streaming';
+      render();
+    }
+    state.streamingTurn.text += deltaText;
+    const el = document.getElementById('streaming-text');
+    if (el) el.textContent = state.streamingTurn.text;
+    else render();
+  };
+
+  callGM('turn', payload, onNarrationDelta).then((data) => {
+    stopLoadingCycle();
+    state.streamingTurn = null;
+    if (!data || data.error) {
+      state.screen = 'error';
+      render();
+      return;
+    }
+    onTurnSuccess(data, turnCount);
+  });
 }
 
 function onTurnSuccess(data, turnCount) {
@@ -548,7 +707,7 @@ function submitAccusationConfirmed() {
 
   state.confirmDialog = false;
 
-  runRequest('accusation', {
+  runStreamingRequest('accusation', {
     caseFile: game.caseFile,
     recap: game.recap,
     accusation: { killer, method: f.method.trim(), motive: f.motive.trim() },
@@ -567,6 +726,7 @@ function onAccusationSuccess(data) {
     trueSolution: data.trueSolution || '',
     epilogue: data.epilogue || '',
     verdictNarration: data.verdictNarration || '',
+    roadsNotTaken: Array.isArray(data.roadsNotTaken) ? data.roadsNotTaken : [],
   };
 
   const archive = loadArchive();
@@ -598,6 +758,7 @@ function renderVerdict() {
     return renderHome();
   }
   const score = v.score || {};
+  const roads = Array.isArray(v.roadsNotTaken) ? v.roadsNotTaken : [];
   return `
     <div class="verdict-screen">
       <div class="screen-header"><h1>Verdict</h1></div>
@@ -627,6 +788,14 @@ function renderVerdict() {
         <h2>Epilogue</h2>
         <p>${esc(v.epilogue)}</p>
       </div>
+      ${roads.length ? `
+        <div class="roads-block">
+          <h2>The Threads You Left Hanging</h2>
+          <ul class="roads-list">
+            ${roads.map((line) => `<li>${esc(line)}</li>`).join('')}
+          </ul>
+        </div>
+      ` : ''}
       <div class="verdict-actions">
         <button class="btn btn-primary btn-block" data-action="verdict-new-case">New Case</button>
         <button class="btn btn-secondary btn-block" data-action="verdict-back-home">Back to Home</button>
@@ -689,6 +858,14 @@ function renderArchiveDetail() {
         <h2>Epilogue</h2>
         <p>${esc(entry.epilogue)}</p>
       </div>
+      ${(entry.roadsNotTaken || []).length ? `
+        <div class="roads-block">
+          <h2>The Threads You Left Hanging</h2>
+          <ul class="roads-list">
+            ${entry.roadsNotTaken.map((line) => `<li>${esc(line)}</li>`).join('')}
+          </ul>
+        </div>
+      ` : ''}
     </div>
   `;
 }
@@ -746,6 +923,11 @@ function onRootClick(e) {
     case 'select-mode':
       ensureSetupForm();
       state.setupForm.mode = el.dataset.mode;
+      render();
+      break;
+    case 'select-length':
+      ensureSetupForm();
+      state.setupForm.length = el.dataset.length;
       render();
       break;
     case 'select-lead': {
@@ -825,6 +1007,7 @@ function onRootSubmit(e) {
       detectives,
       flavor: f.flavor,
       customRequest: f.customRequest.trim(),
+      length: f.length,
     });
   } else if (action === 'submit-action-form') {
     const input = document.getElementById('action-input');
@@ -869,12 +1052,15 @@ function onRootChange(e) {
 }
 
 // New-case generation is split into two calls to stay under the function
-// timeout: a terse caseFile skeleton, then the opening scene built from it.
-// Both run under one continuous loading screen (same loadingKind, so
-// ensureLoadingScreen doesn't restart the typewriter cycle between them).
-// Each step retries independently: a failed opening call re-sends only the
-// opening request against the already-generated caseFile, it doesn't
-// regenerate the skeleton.
+// timeout: a terse caseFile skeleton (no narration to stream — the case
+// file is data, never shown), then the opening scene built from it (which
+// does stream, via runStreamingRequest). Both stay under one continuous
+// loading label until the opening's first narration delta arrives (the
+// 'newCase' loadingKind is passed through explicitly so the typewriter
+// cycle doesn't restart between the two steps). Each step retries
+// independently: a failed opening call re-sends only the opening request
+// against the already-generated caseFile, it doesn't regenerate the
+// skeleton.
 
 function runNewCaseSkeleton(payload) {
   state.pendingRequest = { retry: () => runNewCaseSkeleton(payload) };
@@ -894,19 +1080,13 @@ function runNewCaseSkeleton(payload) {
 }
 
 function runCaseOpening(originalPayload, caseFile) {
-  state.pendingRequest = { retry: () => runCaseOpening(originalPayload, caseFile) };
-  ensureLoadingScreen('newCase');
-
   const openingPayload = { caseFile, detectives: originalPayload.detectives };
-  callGM('caseOpening', openingPayload).then((data) => {
-    stopLoadingCycle();
-    if (!data || data.error) {
-      state.screen = 'error';
-      render();
-      return;
-    }
-    onCaseOpeningSuccess(data, caseFile, originalPayload);
-  });
+  runStreamingRequest(
+    'caseOpening',
+    openingPayload,
+    (data) => onCaseOpeningSuccess(data, caseFile, originalPayload),
+    'newCase', // keep the skeleton phase's loading label/lines, no restart
+  );
 }
 
 function onCaseOpeningSuccess(data, caseFile, originalPayload) {
@@ -915,6 +1095,7 @@ function onCaseOpeningSuccess(data, caseFile, originalPayload) {
     mode: 'deduction',
     createdAt: new Date().toISOString(),
     detectives: originalPayload.detectives,
+    decisionBudget: DECISION_BUDGETS[originalPayload.length] || DECISION_BUDGETS.express,
     caseFile,
     recap: data.recap,
     turns: [{ role: 'gm', narration: data.openingNarration, leads: data.leads || [] }],

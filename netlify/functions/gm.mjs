@@ -32,6 +32,7 @@ export default async (req) => {
 
   let prompt;
   let maxTokens;
+  let narrationField;
 
   switch (body.type) {
     case 'newCaseSkeleton': {
@@ -43,6 +44,7 @@ export default async (req) => {
         customRequest: customRequest || '',
       });
       maxTokens = 2800;
+      // no narrationField: the case file is data, never shown as prose
       break;
     }
     case 'caseOpening': {
@@ -53,10 +55,11 @@ export default async (req) => {
         caseFileJson: JSON.stringify(caseFile),
       });
       maxTokens = 1000;
+      narrationField = 'openingNarration';
       break;
     }
     case 'turn': {
-      const { caseFile, recap, recentTurns, action, detectives = [], turnCount } = body;
+      const { caseFile, recap, recentTurns, action, detectives = [], turnCount, decisionBudget = 20, currentAct = 'act1' } = body;
       prompt = buildTurnPrompt({
         det1: detectives[0] || 'Detective One',
         det2: detectives[1] || 'Detective Two',
@@ -64,9 +67,12 @@ export default async (req) => {
         recap: recap || '',
         recentTurnsJson: JSON.stringify(recentTurns || []),
         turnCount,
+        decisionBudget,
+        currentAct,
         action: action || '',
       });
       maxTokens = 1200;
+      narrationField = 'narration';
       break;
     }
     case 'accusation': {
@@ -80,32 +86,48 @@ export default async (req) => {
         method: accusation.method || '',
         motive: accusation.motive || '',
       });
-      maxTokens = 1500;
+      maxTokens = 1800;
+      narrationField = 'verdictNarration';
       break;
     }
     default:
       return jsonResponse(400, { error: 'bad_request' });
   }
 
-  return streamResult(prompt, maxTokens);
+  return streamResult(prompt, maxTokens, narrationField);
 };
 
 // The response body is newline-delimited JSON (NDJSON): zero or more
 // `{"type":"progress"}` keep-alive lines while the model is generating,
-// followed by exactly one `{"type":"result","payload":{...}}` line as the
-// last thing written before the stream closes. NDJSON keeps the envelope
-// unambiguous even if the transport splits it across multiple TCP chunks —
-// the frontend just buffers text and parses whenever it sees a newline.
-function streamResult(prompt, maxTokens) {
+// zero or more `{"type":"narration-delta","text":"..."}` lines carrying
+// plain-text prose as it's decoded out of the streaming JSON (only for
+// request types that have a narrationField — see below), and finally
+// exactly one `{"type":"result","payload":{...}}` line as the last thing
+// written before the stream closes. NDJSON keeps the envelope unambiguous
+// even if the transport splits it across multiple TCP chunks — the
+// frontend just buffers text and parses whenever it sees a newline.
+//
+// narrationField names the top-level JSON string key (e.g. "narration",
+// "openingNarration", "verdictNarration") whose value should be surfaced
+// progressively for typewriter-by-stream rendering. It's undefined for
+// newCaseSkeleton, whose caseFile is data and never shown as prose.
+function streamResult(prompt, maxTokens, narrationField) {
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
     async start(controller) {
       const send = (obj) => controller.enqueue(encoder.encode(`${JSON.stringify(obj)}\n`));
+      const fieldStreamer = narrationField ? new JsonStringFieldStreamer(narrationField) : null;
 
       let result;
       try {
-        result = await runAnthropicStream(prompt, maxTokens, () => send({ type: 'progress' }));
+        result = await runAnthropicStream(prompt, maxTokens, (deltaText) => {
+          send({ type: 'progress' });
+          if (fieldStreamer) {
+            const decoded = fieldStreamer.push(deltaText);
+            if (decoded) send({ type: 'narration-delta', text: decoded });
+          }
+        });
       } catch (e) {
         console.error(`gm stream error: ${e && e.message}`);
         send({ type: 'result', payload: { error: 'gm_failed' } });
@@ -137,10 +159,92 @@ function streamResult(prompt, maxTokens) {
   });
 }
 
+// Incrementally extracts the decoded value of one top-level JSON string
+// field (e.g. "narration") as raw model output streams in piece by piece.
+// Scoped deliberately narrow: our four response shapes always put the
+// narration-bearing field first and it's always a plain string (never
+// nested), so a small buffer-and-rescan state machine is enough — no need
+// for a general streaming JSON parser.
+class JsonStringFieldStreamer {
+  constructor(fieldName) {
+    this.needle = `"${fieldName}"`;
+    this.raw = '';
+    this.state = 'seek-key'; // seek-key -> seek-colon -> seek-quote -> in-string -> done
+  }
+
+  push(chunk) {
+    this.raw += chunk;
+    if (this.state === 'done') return '';
+
+    if (this.state === 'seek-key') {
+      const idx = this.raw.indexOf(this.needle);
+      if (idx === -1) return '';
+      this.raw = this.raw.slice(idx + this.needle.length);
+      this.state = 'seek-colon';
+    }
+
+    if (this.state === 'seek-colon') {
+      const idx = this.raw.indexOf(':');
+      if (idx === -1) return '';
+      this.raw = this.raw.slice(idx + 1);
+      this.state = 'seek-quote';
+    }
+
+    if (this.state === 'seek-quote') {
+      let i = 0;
+      while (i < this.raw.length && /\s/.test(this.raw[i])) i++;
+      if (i >= this.raw.length) {
+        this.raw = this.raw.slice(i);
+        return '';
+      }
+      if (this.raw[i] !== '"') {
+        // Not a string value where we expected one — give up quietly;
+        // the frontend just falls back to the loading screen for this call.
+        this.state = 'done';
+        return '';
+      }
+      this.raw = this.raw.slice(i + 1);
+      this.state = 'in-string';
+    }
+
+    if (this.state === 'in-string') {
+      let out = '';
+      let i = 0;
+      while (i < this.raw.length) {
+        const ch = this.raw[i];
+        if (ch === '\\') {
+          if (i + 1 >= this.raw.length) break; // incomplete escape, wait for more input
+          const esc = this.raw[i + 1];
+          if (esc === 'u') {
+            if (i + 6 > this.raw.length) break; // incomplete \uXXXX, wait for more input
+            out += String.fromCharCode(parseInt(this.raw.slice(i + 2, i + 6), 16));
+            i += 6;
+          } else {
+            const map = { '"': '"', '\\': '\\', '/': '/', n: '\n', t: '\t', r: '\r', b: '\b', f: '\f' };
+            out += esc in map ? map[esc] : esc;
+            i += 2;
+          }
+        } else if (ch === '"') {
+          this.state = 'done';
+          i += 1;
+          break;
+        } else {
+          out += ch;
+          i += 1;
+        }
+      }
+      this.raw = this.raw.slice(i);
+      return out;
+    }
+
+    return '';
+  }
+}
+
 // One Anthropic call per invocation — no in-function retries. The frontend's
 // retry button already covers recovery; retrying in here just spends more
 // of the same budget that got us into trouble in the first place.
-async function runAnthropicStream(prompt, maxTokens, onProgress) {
+async function runAnthropicStream(prompt, maxTokens, onDelta) {
   const startedAt = Date.now();
   const res = await fetch(ANTHROPIC_URL, {
     method: 'POST',
@@ -193,7 +297,7 @@ async function runAnthropicStream(prompt, maxTokens, onProgress) {
 
       if (sseEvent.type === 'content_block_delta' && sseEvent.delta && typeof sseEvent.delta.text === 'string') {
         text += sseEvent.delta.text;
-        onProgress();
+        onDelta(sseEvent.delta.text);
       } else if (sseEvent.type === 'message_delta' && sseEvent.delta && sseEvent.delta.stop_reason) {
         stopReason = sseEvent.delta.stop_reason;
       } else if (sseEvent.type === 'error') {

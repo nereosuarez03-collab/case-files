@@ -191,6 +191,11 @@ a { color: inherit; }
   border-color: var(--thread);
 }
 
+.input:disabled, .textarea:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* ---------- home screen ---------- */
 .home {
   flex: 1;
@@ -306,6 +311,14 @@ a { color: inherit; }
   letter-spacing: 0.1em;
 }
 
+.option-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.62rem;
+  color: var(--pencil);
+  letter-spacing: 0.05em;
+}
+
 /* ---------- loading screen ---------- */
 .loading-screen {
   flex: 1;
@@ -333,7 +346,7 @@ a { color: inherit; }
   min-height: 1.6em;
 }
 
-.loading-line .cursor {
+.cursor {
   display: inline-block;
   width: 0.5em;
   background: var(--thread);
@@ -388,6 +401,13 @@ a { color: inherit; }
 
 .case-page .narration:first-line {
   letter-spacing: 0.01em;
+}
+
+/* the turn/case-opening loading placeholder reuses .loading-line's markup
+   and typewriter JS, but it's paper-context here instead of dark-chrome —
+   override the text color so it isn't pale-on-pale */
+.case-page .loading-line {
+  color: var(--type);
 }
 
 /* ---------- turn feed ---------- */
@@ -586,11 +606,11 @@ a { color: inherit; }
 .score-badge[data-score="partial"] .verdict-tag { color: #d0a23c; }
 .score-badge[data-score="missed"] .verdict-tag { color: var(--thread); }
 
-.solution-block, .epilogue-block {
+.solution-block, .epilogue-block, .roads-block {
   margin-top: 18px;
 }
 
-.solution-block h2, .epilogue-block h2 {
+.solution-block h2, .epilogue-block h2, .roads-block h2 {
   font-family: var(--font-type);
   text-transform: uppercase;
   font-size: 0.8rem;
@@ -604,6 +624,19 @@ a { color: inherit; }
   line-height: 1.6;
   white-space: pre-wrap;
 }
+
+.roads-list {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.roads-list li {
+  font-family: var(--font-body);
+  line-height: 1.6;
+  margin-bottom: 8px;
+}
+
+.roads-list li:last-child { margin-bottom: 0; }
 
 .verdict-actions {
   display: flex;
