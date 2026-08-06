@@ -1,0 +1,11 @@
+{
+  "name": "case-files-tests",
+  "private": true,
+  "description": "Dev-only tooling. Not part of the deployed app or its Netlify build (see SPEC.md section 1: vanilla HTML/CSS/JS, no build step) — this exists solely so `npm install` can fetch Playwright for the regression test in tests/.",
+  "scripts": {
+    "test:free-text": "node tests/free-text-action.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.48.0"
+  }
+}
