@@ -844,6 +844,8 @@ function runNewCaseSkeleton(payload) {
   ensureLoadingScreen('newCase');
 
   callGM('newCaseSkeleton', payload).then((data) => {
+    // data.error covers both "gm_failed" (parse/request failure) and
+    // "gm_truncated" (hit max_tokens) — both surface the same retry screen.
     if (!data || data.error || !data.caseFile) {
       stopLoadingCycle();
       state.screen = 'error';
