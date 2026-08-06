@@ -5,13 +5,31 @@
 // from within its own directory — a parent-directory relative import is not
 // reachable at runtime once Netlify packages the function.
 
-function buildNewCaseSkeletonPrompt({ det1, det2, flavor, customRequest }) {
+function buildNewCaseSkeletonPrompt({ det1, det2, flavor, tone, customRequest }) {
+  const isDread = tone === 'dread';
+
+  const dreadRequirement = isDread ? `
+- Dread tone: generate the case around isolation — a place with a history,
+  a community that won't talk, a prior incident that echoes into this one.
+  Include 3 to 5 "apparent phenomena": events that feel impossible (a knock
+  in an empty house, a voice, a cold touch, a light that shouldn't be on),
+  each paired with its concrete human explanation, hidden until surfaced.
+  The rules of any case still apply in full: one true culprit, fair
+  evidence, a fully rational solution, no supernatural cause, ever.
+  Restraint is the rule — dread comes from what is withheld, sound, and
+  implication, never escalating spectacle or gore. Dread cases skew
+  reactive or hostile posture.` : '';
+
+  const dreadSchema = isDread
+    ? `,\n    "apparentPhenomena": [ { "phenomenon": "", "explanation": "" } ]`
+    : '';
+
   return `You are the case architect for a two-player detective game. Generate a complete,
 self-consistent crime case that will be narrated over many turns. The players
 never see this file; it is the hidden ground truth the narrator must obey.
 
 Detectives: ${det1} and ${det2}.
-Requested flavor: ${flavor}. Player request to honor if present: "${customRequest}".
+Requested flavor: ${flavor}. Tone: ${tone}. Player request to honor if present: "${customRequest}".
 
 Requirements:
 - Grounded and realistic. No supernatural elements. Adult tension is fine.
@@ -30,6 +48,24 @@ Requirements:
 - A three-act plan for pacing, one line each: act1 (the scene and the
   suspects come into view), act2 (contradictions surface and alibis start to
   strain), act3 (the endgame — pressure converges toward an accusation).
+- A culprit posture, chosen to fit who this culprit actually is: "passive"
+  (stays hidden, no counter-moves), "reactive" (from act2, destroys
+  evidence, pressures witnesses, changes routine as the detectives close
+  in), or "hostile" (acts against the detectives themselves — surveillance,
+  a message, a witness silenced, misdirection aimed at them). Most cases
+  should be passive or reactive; reserve hostile for a culprit it genuinely
+  fits.
+- A case clock: caseStart (the in-story day and time the investigation
+  begins, terse, e.g. "Day 1, 9:40 PM") and a deadlineEvent — one specific
+  event invented from this case's own facts that occurs when the clock
+  expires (a suspect's flight, a body released for cremation, a witness
+  leaving protective custody, a trust executing). Never a generic "time
+  runs out."
+- What makes this case good: a motive rooted in a personal wound, not only
+  mechanics; a culprit whose competence explains why they weren't caught
+  earlier; at least one thread that can be permanently lost if not pursued
+  in time; a solution whose emotional logic lands when revealed, not just
+  its evidentiary logic.${dreadRequirement}
 - Every field in this JSON is terse and information-dense: one short
   sentence each, no prose flourishes, no scene-setting language anywhere in
   the case file. This is a data file, not narration.
@@ -47,12 +83,20 @@ Respond with ONLY this JSON:
                   "timeline": "" },
     "evidenceMap": [ { "clue": "", "location": "", "pointsTo": "",
                        "redHerring": false } ],
-    "actPlan": { "act1": "", "act2": "", "act3": "" }
+    "actPlan": { "act1": "", "act2": "", "act3": "" },
+    "posture": "passive",
+    "caseStart": "",
+    "deadlineEvent": ""${dreadSchema}
   }
 }`;
 }
 
-function buildCaseOpeningPrompt({ det1, det2, caseFileJson }) {
+function buildCaseOpeningPrompt({ det1, det2, caseFileJson, tone }) {
+  const isDread = tone === 'dread';
+  const toneNote = isDread
+    ? ' Lean into the isolation and quiet unease of a Dread case — no apparent phenomenon needs to appear yet; that is for later turns.'
+    : '';
+
   return `You are the game master opening a detective case for two players sharing one
 screen: ${det1} and ${det2}. Below is the HIDDEN case file (ground truth you
 must never contradict and never reveal directly).
@@ -62,7 +106,7 @@ HIDDEN CASE FILE: ${caseFileJson}
 Write a short opening dispatch scene (150-250 words) that lays out the
 situation and ends at a decision point. Write it in second person plural,
 present tense, cinematic but concrete. Never address the real players, only
-the detective characters.
+the detective characters.${toneNote}
 
 Then propose exactly 4 initial leads: short imperative phrases, each a
 genuinely different investigative direction.
@@ -74,7 +118,16 @@ Respond with ONLY this JSON:
 { "openingNarration": "", "leads": ["", "", "", ""], "recap": "" }`;
 }
 
-function buildTurnPrompt({ det1, det2, caseFileJson, recap, recentTurnsJson, turnCount, decisionBudget, currentAct, action }) {
+function buildTurnPrompt({ det1, det2, caseFileJson, recap, recentTurnsJson, turnCount, clockBudgetHours, hoursRemaining, currentAct, tone, action }) {
+  const isDread = tone === 'dread';
+  const dreadRule = isDread ? `
+- Dread pacing: reveal at most one "apparent phenomenon" per act, with
+  quiet, ordinary scenes between them — dread comes from what is withheld,
+  sound, and implication, never escalating spectacle or gore. Never explain
+  a phenomenon in the same scene where it occurs; the human explanation
+  surfaces later, only when genuinely earned. Track in the recap which
+  phenomena have appeared and which have been explained.` : '';
+
   return `You are the game master narrating a detective case for two players sharing one
 screen: ${det1} and ${det2}. Below is the HIDDEN case file (ground truth you
 must never contradict and never reveal directly), a recap of the investigation
@@ -83,7 +136,7 @@ so far, and the most recent turns.
 HIDDEN CASE FILE: ${caseFileJson}
 RECAP: ${recap}
 RECENT TURNS: ${recentTurnsJson}
-TURN NUMBER: ${turnCount} of a ${decisionBudget}-decision case, currently ${currentAct}
+TURN NUMBER: ${turnCount}. CLOCK: ${hoursRemaining} hours remaining of ${clockBudgetHours}, currently ${currentAct}.
 THE DETECTIVES NOW: ${action}
 
 Rules:
@@ -97,21 +150,38 @@ Rules:
   definitively clear any suspect before act3 — an alibi can hold up while
   suspicion stays alive; innocents keep lying about their secrets the whole
   game.
+- Honor the culprit's posture from the case file: passive stays hidden with
+  no counter-moves; reactive starts covering tracks, pressuring witnesses,
+  or changing routine once act2 begins; hostile acts against the detectives
+  themselves (surveillance, a message, a witness silenced, misdirection
+  aimed at them) and may put a named NPC in danger — tension over shock,
+  never gore.${dreadRule}
+- Never let a lead name, or narration reference as already known, a person
+  who hasn't yet been introduced in narration. Keep a "cast so far" note in
+  the recap and check new leads against it.
+- Assign this action an hoursSpent cost and return it: a quick interview or
+  scene walk is 1-2 hours; a records pull, canvass, or lab request is 3-4;
+  results that must be waited on (tox, prints, a warrant) are 6-8; anything
+  that waits for morning or a scheduled person is 8-14. Choose realistically
+  for what the detectives just did, reflect the passage of time in the
+  narration, and return currentTime: the in-story day and time now, in the
+  same terse format as caseStart in the case file (e.g. "Day 2, 3:15 AM").
 - Reveal clues gradually. Each turn should give real progress: at least one
   concrete fact from the evidence map or timeline, surfaced naturally. Pace
-  toward the evidence map being mostly revealed by about 80% of the
-  ${decisionBudget}-decision budget. Past that point, apply in-fiction
-  convergence pressure — the DA wants a charge, a suspect lawyers up, a lead
-  is about to go cold — that pushes the players toward an accusation without
-  ever hard-stopping them: they can keep investigating, but the world keeps
-  pressing.
+  toward the evidence map being mostly revealed well before the clock runs
+  out. Under 12 hours remaining, the DA presses for a charge — apply
+  in-fiction convergence pressure without ever hard-stopping the detectives:
+  they can keep investigating, but the world keeps pressing. At zero hours
+  or below, the deadlineEvent from the case file happens in the narration
+  itself, the case is forced to resolution, and this is the last turn — do
+  not propose leads.
 - Never confirm or deny theories. Never name the culprit as such. If players
   guess right mid-game, stay neutral and consistent.
 - If the action is something impossible or outside the world, deflect
   in-fiction (a warrant is denied, records are sealed) and offer a nearby
   alternative.
 - Choosing a lead can close others: unchosen time-sensitive threads resolve
-  offstage, without the players (the scene gets processed by techs and comes
+  offstage as the hours pass (the scene gets processed by techs and comes
   back as a report only, a witness leaves town). Acknowledge closures
   naturally in the narration when they happen, and track them in the recap.
   Choices should feel like spending, not browsing.
@@ -126,11 +196,12 @@ Rules:
   Shuffle their order. Never reference a fact that hasn't already been
   surfaced in narration.
 - Update the recap: 120 words max, neutral, cover everything discovered so
-  far including this turn, and note any thread that just closed offstage.
-  The recap is your only long-term memory.
+  far including this turn, a short "cast so far" list of named people
+  already introduced, and note any thread that just closed offstage. The
+  recap is your only long-term memory.
 
 Respond with ONLY this JSON:
-{ "narration": "", "leads": ["", "", ""], "recap": "" }`;
+{ "narration": "", "leads": ["", "", ""], "recap": "", "hoursSpent": 0, "currentTime": "" }`;
 }
 
 function buildAccusationPrompt({ caseFileJson, recap, det1, det2, killer, method, motive }) {
@@ -157,18 +228,21 @@ Then write:
   honestly. Never mock the players.
 - trueSolution (concise): killer, accomplice if any, method, motive, and the
   two or three clues that pointed there.
-- epilogue: 3 to 5 short lines on what happens to the people of the case
-  afterward.
-- roadsNotTaken: 3 to 4 short lines on investigative threads from the case
-  file that the recap shows they never pulled, or pulled but let close
-  early, and what each would have revealed (e.g. "You never traced the
-  second phone — it would have given you the motive by act 2."). Ground
-  every line in clues or suspects that actually exist in the case file;
-  never invent a thread that wasn't there.
+- epilogue: 3 to 4 lines, only consequences connected to the crime or its
+  investigation — cut anything about a character's unrelated personal life.
+- roadsNotTaken: scaled to the scorecard you just determined. If killer,
+  method, and motive are all "correct", write exactly 2 short atmospheric
+  lines, no coaching tone. If any is "partial" or "missed", write the fuller
+  version instead: up to 4 lines, each naming a thread from the case file
+  the recap shows they never pulled or let close early, and what it would
+  have established (e.g. "You never traced the second phone — it would have
+  given you the motive by act 2."). Ground every line in clues or suspects
+  that actually exist in the case file; never invent a thread that wasn't
+  there, and never write it as a prosecutor's post-mortem.
 
 Respond with ONLY this JSON:
 { "verdictNarration": "", "score": { "killer": "", "method": "", "motive": "" },
-  "trueSolution": "", "epilogue": "", "roadsNotTaken": ["", "", "", ""] }`;
+  "trueSolution": "", "epilogue": "", "roadsNotTaken": ["", ""] }`;
 }
 
 export {
