@@ -33,7 +33,7 @@ exports.handler = async (event) => {
         flavor: flavor || 'Surprise us',
         customRequest: customRequest || '',
       });
-      maxTokens = 2200;
+      maxTokens = 1600;
       break;
     }
     case 'caseOpening': {
@@ -78,33 +78,30 @@ exports.handler = async (event) => {
       return json(400, { error: 'bad_request' });
   }
 
-  const parsed = await callModelWithRetry(prompt, maxTokens);
-  if (!parsed) {
-    return json(200, { error: 'gm_failed' });
-  }
-
-  return json(200, parsed);
+  const result = await callModelOnce(prompt, maxTokens);
+  return json(200, result);
 };
 
-async function callModelWithRetry(prompt, maxTokens) {
+// One attempt per invocation — no in-function retries. Retrying here on top
+// of a slow first call is what was blowing past the platform's 60s function
+// timeout; the frontend's retry button already covers recovery.
+async function callModelOnce(prompt, maxTokens) {
+  let result;
   try {
-    const first = await callModel(prompt, maxTokens);
-    const parsedFirst = tryParseJson(first);
-    if (parsedFirst) return parsedFirst;
+    result = await callModel(prompt, maxTokens);
   } catch (e) {
-    // fall through to retry
+    return { error: 'gm_failed' };
   }
 
-  try {
-    const retryPrompt = `${prompt}\n\nRespond with valid JSON only.`;
-    const second = await callModel(retryPrompt, maxTokens);
-    const parsedSecond = tryParseJson(second);
-    if (parsedSecond) return parsedSecond;
-  } catch (e) {
-    // fall through to null
+  if (result.stopReason === 'max_tokens') {
+    return { error: 'gm_truncated' };
   }
 
-  return null;
+  const parsed = tryParseJson(result.text);
+  if (!parsed) {
+    return { error: 'gm_failed' };
+  }
+  return parsed;
 }
 
 async function callModel(prompt, maxTokens) {
@@ -123,16 +120,19 @@ async function callModel(prompt, maxTokens) {
     }),
   });
   const elapsedMs = Date.now() - startedAt;
-  console.log(`anthropic response: status=${res.status} elapsedMs=${elapsedMs} maxTokens=${maxTokens}`);
 
   if (!res.ok) {
     const errBody = await res.text().catch(() => '');
-    console.error(`anthropic error body: ${errBody}`);
+    console.error(`anthropic error: status=${res.status} elapsedMs=${elapsedMs} maxTokens=${maxTokens} body=${errBody}`);
     throw new Error(`anthropic_error_${res.status}`);
   }
 
   const data = await res.json();
-  return data && data.content && data.content[0] ? data.content[0].text : '';
+  const stopReason = data && data.stop_reason;
+  console.log(`anthropic response: status=${res.status} elapsedMs=${elapsedMs} maxTokens=${maxTokens} stopReason=${stopReason}`);
+
+  const text = data && data.content && data.content[0] ? data.content[0].text : '';
+  return { text, stopReason };
 }
 
 function tryParseJson(text) {
