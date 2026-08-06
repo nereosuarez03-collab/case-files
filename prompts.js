@@ -12,18 +12,21 @@ Requested flavor: ${flavor}. Player request to honor if present: "${customReques
 
 Requirements:
 - Grounded and realistic. No supernatural elements. Adult tension is fine.
-- A victim, a setting with atmosphere, and exactly 4 or 5 suspects.
+- A victim, a setting with atmosphere, and exactly 4 suspects.
 - Exactly one culprit (an accomplice is allowed and encouraged sometimes).
 - Every suspect has: name, age, relation to victim, a real motive, a claimed
-  alibi, and a secret (which for innocents is unrelated to the murder).
-- A precise hidden timeline of the crime night, minute-level where it matters.
-- An evidence map of 8 to 12 clues: each has where it is found, what it truly
-  points to, and whether it is a red herring. At least 2 red herrings. Clues
-  must make the case FAIRLY solvable: a careful player following real clues
-  can identify killer, method, and motive.
+  alibi, and a secret (which for innocents is unrelated to the murder). Each
+  of those fields is one short sentence.
+- A hidden timeline of the crime night: 6 lines maximum, one line each,
+  minute-level where it matters.
+- An evidence map of exactly 8 clues: each has where it is found, what it
+  truly points to, and whether it is a red herring, one line each. At least
+  2 red herrings. Clues must make the case FAIRLY solvable: a careful player
+  following real clues can identify killer, method, and motive.
 - One piece of physical evidence must contradict the killer's alibi.
-- Keep every field terse and information-dense: this is a data file, not
-  prose. Timeline and evidence-map entries are one line each.
+- Every field in this JSON is terse and information-dense: one short
+  sentence each, no prose flourishes, no scene-setting language anywhere in
+  the case file. This is a data file, not narration.
 
 Respond with ONLY this JSON:
 {
