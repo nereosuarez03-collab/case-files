@@ -1,6 +1,9 @@
 // Prompt templates for the GM, verbatim from SPEC.md section 7.
-// Exported as builder functions so gm.js can interpolate {{placeholders}}
-// without a template engine or build step.
+// Exported as builder functions so gm.mjs can interpolate {{placeholders}}
+// without a template engine or build step. Lives next to gm.mjs (rather than
+// at the repo root) because the bundled function can only resolve imports
+// from within its own directory — a parent-directory relative import is not
+// reachable at runtime once Netlify packages the function.
 
 function buildNewCaseSkeletonPrompt({ det1, det2, flavor, customRequest }) {
   return `You are the case architect for a two-player detective game. Generate a complete,
@@ -137,7 +140,7 @@ Respond with ONLY this JSON:
   "trueSolution": "", "epilogue": "" }`;
 }
 
-module.exports = {
+export {
   buildNewCaseSkeletonPrompt,
   buildCaseOpeningPrompt,
   buildTurnPrompt,
