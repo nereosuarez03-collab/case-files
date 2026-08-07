@@ -3,7 +3,8 @@
 // reachable at runtime — only files under netlify/functions/ get packaged
 // with the function.
 import {
-  buildNewCaseSkeletonPrompt,
+  buildNewCaseCorePrompt,
+  buildNewCaseDetailPrompt,
   buildCaseOpeningPrompt,
   buildTurnPrompt,
   buildAccusationPrompt,
@@ -17,7 +18,13 @@ const ANTHROPIC_VERSION = '2023-06-01';
 // a standard Response. Returning a Response whose body is a ReadableStream
 // keeps the connection open past the platform's synchronous timeout, since
 // bytes keep flowing instead of the function sitting silently until it
-// returns — that silence is what was killing newCaseSkeleton at 60s.
+// returns. That alone isn't sufficient, though — see netlify.toml, which
+// used to apply a catch-all [[headers]] rule to every path including this
+// function, forcing Netlify's edge to buffer the response to attach headers
+// and silently reintroducing the platform's buffered-invocation timeout.
+// Case generation is also split into two calls (newCaseCore, newCaseDetail)
+// so each stays safely under that ceiling even in a worst-case fully-
+// buffered scenario, independent of whether streaming reaches the client.
 export default async (req) => {
   if (req.method !== 'POST') {
     return jsonResponse(405, { error: 'method_not_allowed' });
@@ -35,17 +42,29 @@ export default async (req) => {
   let narrationField;
 
   switch (body.type) {
-    case 'newCaseSkeleton': {
+    case 'newCaseCore': {
       const { detectives = [], flavor, tone, customRequest } = body;
-      prompt = buildNewCaseSkeletonPrompt({
+      prompt = buildNewCaseCorePrompt({
         det1: detectives[0] || 'Detective One',
         det2: detectives[1] || 'Detective Two',
         flavor: flavor || 'Surprise us',
         tone: tone || 'straight',
         customRequest: customRequest || '',
       });
-      maxTokens = 2800;
+      maxTokens = 1800;
       // no narrationField: the case file is data, never shown as prose
+      break;
+    }
+    case 'newCaseDetail': {
+      const { caseFile, tone, detectives = [] } = body;
+      prompt = buildNewCaseDetailPrompt({
+        det1: detectives[0] || 'Detective One',
+        det2: detectives[1] || 'Detective Two',
+        coreCaseFileJson: JSON.stringify(caseFile),
+        tone: tone || 'straight',
+      });
+      maxTokens = 1800;
+      // no narrationField: same reasoning as newCaseCore
       break;
     }
     case 'caseOpening': {
@@ -101,7 +120,7 @@ export default async (req) => {
       return jsonResponse(400, { error: 'bad_request' });
   }
 
-  return streamResult(prompt, maxTokens, narrationField);
+  return streamResult(prompt, maxTokens, narrationField, body.type);
 };
 
 // The response body is newline-delimited JSON (NDJSON): zero or more
@@ -117,8 +136,11 @@ export default async (req) => {
 // narrationField names the top-level JSON string key (e.g. "narration",
 // "openingNarration", "verdictNarration") whose value should be surfaced
 // progressively for typewriter-by-stream rendering. It's undefined for
-// newCaseSkeleton, whose caseFile is data and never shown as prose.
-function streamResult(prompt, maxTokens, narrationField) {
+// newCaseCore/newCaseDetail, whose caseFile pieces are data and never shown
+// as prose. requestType is passed through purely for the elapsedMs log line
+// below, so a slow call is traceable to which of the (now five) request
+// types it was.
+function streamResult(prompt, maxTokens, narrationField, requestType) {
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
@@ -128,7 +150,7 @@ function streamResult(prompt, maxTokens, narrationField) {
 
       let result;
       try {
-        result = await runAnthropicStream(prompt, maxTokens, (deltaText) => {
+        result = await runAnthropicStream(prompt, maxTokens, requestType, (deltaText) => {
           send({ type: 'progress' });
           if (fieldStreamer) {
             const decoded = fieldStreamer.push(deltaText);
@@ -136,7 +158,7 @@ function streamResult(prompt, maxTokens, narrationField) {
           }
         });
       } catch (e) {
-        console.error(`gm stream error: ${e && e.message}`);
+        console.error(`gm stream error: type=${requestType} ${e && e.message}`);
         send({ type: 'result', payload: { error: 'gm_failed' } });
         controller.close();
         return;
@@ -251,7 +273,7 @@ class JsonStringFieldStreamer {
 // One Anthropic call per invocation — no in-function retries. The frontend's
 // retry button already covers recovery; retrying in here just spends more
 // of the same budget that got us into trouble in the first place.
-async function runAnthropicStream(prompt, maxTokens, onDelta) {
+async function runAnthropicStream(prompt, maxTokens, requestType, onDelta) {
   const startedAt = Date.now();
   const res = await fetch(ANTHROPIC_URL, {
     method: 'POST',
@@ -270,7 +292,7 @@ async function runAnthropicStream(prompt, maxTokens, onDelta) {
 
   if (!res.ok) {
     const errBody = await res.text().catch(() => '');
-    console.error(`anthropic error: status=${res.status} elapsedMs=${Date.now() - startedAt} maxTokens=${maxTokens} body=${errBody}`);
+    console.error(`anthropic error: type=${requestType} status=${res.status} elapsedMs=${Date.now() - startedAt} maxTokens=${maxTokens} body=${errBody}`);
     throw new Error(`anthropic_error_${res.status}`);
   }
 
@@ -314,7 +336,7 @@ async function runAnthropicStream(prompt, maxTokens, onDelta) {
   }
 
   const elapsedMs = Date.now() - startedAt;
-  console.log(`anthropic stream done: elapsedMs=${elapsedMs} maxTokens=${maxTokens} stopReason=${stopReason} textLen=${text.length}`);
+  console.log(`anthropic stream done: type=${requestType} elapsedMs=${elapsedMs} maxTokens=${maxTokens} stopReason=${stopReason} textLen=${text.length}`);
 
   return { text, stopReason };
 }
