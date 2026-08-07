@@ -5,8 +5,45 @@
 [functions]
   node_bundler = "esbuild"
 
+# Scoped to the actual static assets (not a "/*" catch-all) so these rules
+# never match /.netlify/functions/*: Netlify's edge merges [[headers]] rules
+# onto the origin response, which requires buffering a function response
+# before it can attach headers — defeating gm.mjs's streamed Response and
+# re-imposing the platform's buffered-invocation timeout. The function's own
+# responses (application/x-ndjson, never rendered as a page) don't need
+# browser-security headers anyway.
 [[headers]]
-  for = "/*"
+  for = "/"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+[[headers]]
+  for = "/*.html"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+[[headers]]
+  for = "/*.js"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+[[headers]]
+  for = "/*.css"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+[[headers]]
+  for = "/*.webmanifest"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+[[headers]]
+  for = "/icons/*"
   [headers.values]
     X-Content-Type-Options = "nosniff"
     Referrer-Policy = "strict-origin-when-cross-origin"

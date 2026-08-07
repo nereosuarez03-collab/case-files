@@ -155,7 +155,7 @@ let loadingTimer = null;
 // any number of {"type":"narration-delta","text":"..."} lines carrying
 // plain-text prose as it's decoded server-side out of the streaming JSON
 // (forwarded to onNarrationDelta if provided; not every request type has
-// one — newCaseSkeleton never does), then exactly one
+// one — newCaseCore and newCaseDetail never do), then exactly one
 // {"type":"result","payload":{...}} line before the stream closes.
 // Buffering and splitting on "\n" is safe even when the transport splits
 // the NDJSON across multiple chunks, since we only act once a full line is
@@ -1067,7 +1067,7 @@ function onRootSubmit(e) {
     saveSettings({ detectives });
     state.settings = { detectives };
 
-    runNewCaseSkeleton({
+    runNewCaseCore({
       detectives,
       flavor: f.flavor,
       tone: f.tone,
@@ -1116,22 +1116,24 @@ function onRootChange(e) {
   }
 }
 
-// New-case generation is split into two calls to stay under the function
-// timeout: a terse caseFile skeleton (no narration to stream — the case
-// file is data, never shown), then the opening scene built from it (which
-// does stream, via runStreamingRequest). Both stay under one continuous
-// loading label until the opening's first narration delta arrives (the
-// 'newCase' loadingKind is passed through explicitly so the typewriter
-// cycle doesn't restart between the two steps). Each step retries
-// independently: a failed opening call re-sends only the opening request
-// against the already-generated caseFile, it doesn't regenerate the
-// skeleton.
+// New-case generation is split into three calls, each individually well
+// under the function's timeout: a terse core caseFile (identity, cast,
+// solution, clock, posture), a detail pass built on top of it (evidence,
+// act plan, and — Dread only — apparent phenomena), then the narrated
+// opening scene. None of the first two stream narration — the case file is
+// data, never shown — only the opening does, via runStreamingRequest. All
+// three stay under one continuous loading label until the opening's first
+// narration delta arrives (the 'newCase' loadingKind is passed through
+// explicitly so the typewriter cycle doesn't restart between steps). Each
+// step retries independently: a failed detail call re-sends only itself
+// against the already-generated core caseFile, it doesn't regenerate the
+// core; a failed opening call doesn't regenerate either earlier step.
 
-function runNewCaseSkeleton(payload) {
-  state.pendingRequest = { retry: () => runNewCaseSkeleton(payload) };
+function runNewCaseCore(payload) {
+  state.pendingRequest = { retry: () => runNewCaseCore(payload) };
   ensureLoadingScreen('newCase');
 
-  callGM('newCaseSkeleton', payload).then((data) => {
+  callGM('newCaseCore', payload).then((data) => {
     // data.error covers both "gm_failed" (parse/request failure) and
     // "gm_truncated" (hit max_tokens) — both surface the same retry screen.
     if (!data || data.error || !data.caseFile) {
@@ -1140,7 +1142,28 @@ function runNewCaseSkeleton(payload) {
       render();
       return;
     }
-    runCaseOpening(payload, data.caseFile);
+    runNewCaseDetail(payload, data.caseFile);
+  });
+}
+
+function runNewCaseDetail(originalPayload, coreCaseFile) {
+  state.pendingRequest = { retry: () => runNewCaseDetail(originalPayload, coreCaseFile) };
+  ensureLoadingScreen('newCase');
+
+  callGM('newCaseDetail', {
+    caseFile: coreCaseFile,
+    tone: originalPayload.tone,
+    detectives: originalPayload.detectives,
+  }).then((data) => {
+    if (!data || data.error || !data.evidenceMap || !data.actPlan) {
+      stopLoadingCycle();
+      state.screen = 'error';
+      render();
+      return;
+    }
+    const fullCaseFile = { ...coreCaseFile, evidenceMap: data.evidenceMap, actPlan: data.actPlan };
+    if (data.apparentPhenomena) fullCaseFile.apparentPhenomena = data.apparentPhenomena;
+    runCaseOpening(originalPayload, fullCaseFile);
   });
 }
 
@@ -1150,7 +1173,7 @@ function runCaseOpening(originalPayload, caseFile) {
     'caseOpening',
     openingPayload,
     (data) => onCaseOpeningSuccess(data, caseFile, originalPayload),
-    'newCase', // keep the skeleton phase's loading label/lines, no restart
+    'newCase', // keep the core/detail phases' loading label/lines, no restart
   );
 }
 
