@@ -5,13 +5,16 @@
 // from within its own directory — a parent-directory relative import is not
 // reachable at runtime once Netlify packages the function.
 
-// Case generation is split into two calls, each individually well under the
-// platform's ~60s ceiling even in a worst-case fully-buffered response: the
-// core (identity, cast, solution, clock, posture) establishes the ground
-// truth, then the detail pass builds the investigable surface (clues,
-// pacing, and — Dread only — apparent phenomena) on top of it, receiving
-// the core as context so it stays consistent. Each is capped at 1800
-// max_tokens (see gm.mjs).
+// Case generation is split into up to three calls, each individually well
+// under the platform's ~60s ceiling even in a worst-case fully-buffered
+// response: the core (identity, cast, solution, clock, posture) establishes
+// the ground truth, the detail pass builds the investigable surface (clues,
+// pacing) on top of it, and — Dread tone only — a third call adds the
+// apparent phenomena. Splitting phenomena out keeps the detail pass itself
+// terse enough to stay well under 1800 max_tokens even with the widest
+// evidence map; the phenomena call is capped at 1000 max_tokens (see
+// gm.mjs). Each call receives whatever's already been generated as context
+// so the whole case stays consistent.
 
 function buildNewCaseCorePrompt({ det1, det2, flavor, tone, customRequest }) {
   const isDread = tone === 'dread';
@@ -77,51 +80,59 @@ Respond with ONLY this JSON:
 }`;
 }
 
-function buildNewCaseDetailPrompt({ det1, det2, coreCaseFileJson, tone }) {
-  const isDread = tone === 'dread';
-
-  const dreadRequirement = isDread ? `
-- Include 3 to 5 "apparent phenomena": events that feel impossible (a knock
-  in an empty house, a voice, a cold touch, a light that shouldn't be on),
-  each paired with its concrete human explanation, hidden until surfaced.
-  The rules of any case still apply in full: one true culprit, fair
-  evidence, a fully rational solution, no supernatural cause, ever.
-  Restraint is the rule — dread comes from what is withheld, sound, and
-  implication, never escalating spectacle or gore.` : '';
-
-  const dreadSchema = isDread
-    ? `,\n  "apparentPhenomena": [ { "phenomenon": "", "explanation": "" } ]`
-    : '';
-
-  return `You are the case architect finishing a detective case for two players sharing
-one screen: ${det1} and ${det2}. Below is the core of the case already
-established — ground truth you must stay perfectly consistent with. Build the
-investigable surface on top of it: the evidence and the pacing (and, if this
-is a Dread case, what feels impossible).
+function buildNewCaseDetailPrompt({ det1, det2, coreCaseFileJson }) {
+  return `You are the case architect finishing the investigable surface of a detective
+case for two players sharing one screen: ${det1} and ${det2}. Below is the
+core of the case already established — ground truth you must stay perfectly
+consistent with.
 
 CORE CASE FILE: ${coreCaseFileJson}
 
 Requirements:
 - An evidence map of exactly 8 clues: each has where it is found, what it
-  truly points to, and whether it is a red herring, one line each. At least
-  2 red herrings. Clues must make the case FAIRLY solvable: a careful player
-  following real clues can identify killer, method, and motive.
+  truly points to, and whether it is a red herring — strictly one short
+  fragment per field, not a sentence. At least 2 red herrings. Clues must
+  make the case FAIRLY solvable: a careful player following real clues can
+  identify killer, method, and motive.
 - One piece of physical evidence must contradict the killer's alibi.
 - At least one clue or thread that can be permanently lost if the detectives
   don't pursue it in time.
-- A three-act plan for pacing, one line each: act1 (the scene and the
-  suspects come into view), act2 (contradictions surface and alibis start to
-  strain), act3 (the endgame — pressure converges toward an accusation).${dreadRequirement}
-- Every field in this JSON is terse and information-dense: one short
-  sentence each, no prose flourishes, no scene-setting language anywhere.
-  This is a data file, not narration.
+- A three-act plan for pacing: act1 (the scene and the suspects come into
+  view), act2 (contradictions surface and alibis start to strain), act3 (the
+  endgame — pressure converges toward an accusation). Each act is at most 2
+  short fragments, not sentences.
+- No prose anywhere. This is a data file: fragments and short phrases only,
+  never a full sentence, never scene-setting language.
 
 Respond with ONLY this JSON:
 {
   "evidenceMap": [ { "clue": "", "location": "", "pointsTo": "",
                      "redHerring": false } ],
-  "actPlan": { "act1": "", "act2": "", "act3": "" }${dreadSchema}
+  "actPlan": { "act1": "", "act2": "", "act3": "" }
 }`;
+}
+
+function buildNewCasePhenomenaPrompt({ det1, det2, caseFileJson }) {
+  return `You are the case architect adding Dread-tone apparent phenomena to a
+detective case for two players sharing one screen: ${det1} and ${det2}. Below
+is the case already established — ground truth you must stay perfectly
+consistent with.
+
+CASE FILE: ${caseFileJson}
+
+Requirements:
+- Include 3 to 5 "apparent phenomena": events that feel impossible (a knock
+  in an empty house, a voice, a cold touch, a light that shouldn't be on),
+  each paired with its concrete human explanation, hidden until surfaced.
+- The rules of any case still apply in full: one true culprit, fair
+  evidence, a fully rational solution, no supernatural cause, ever.
+- Restraint is the rule — dread comes from what is withheld, sound, and
+  implication, never escalating spectacle or gore.
+- Every field in this JSON is terse and information-dense: one short
+  sentence each, no prose flourishes.
+
+Respond with ONLY this JSON:
+{ "apparentPhenomena": [ { "phenomenon": "", "explanation": "" } ] }`;
 }
 
 function buildCaseOpeningPrompt({ det1, det2, caseFileJson, tone }) {
@@ -281,6 +292,7 @@ Respond with ONLY this JSON:
 export {
   buildNewCaseCorePrompt,
   buildNewCaseDetailPrompt,
+  buildNewCasePhenomenaPrompt,
   buildCaseOpeningPrompt,
   buildTurnPrompt,
   buildAccusationPrompt,

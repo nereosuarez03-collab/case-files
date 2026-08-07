@@ -5,6 +5,7 @@
 import {
   buildNewCaseCorePrompt,
   buildNewCaseDetailPrompt,
+  buildNewCasePhenomenaPrompt,
   buildCaseOpeningPrompt,
   buildTurnPrompt,
   buildAccusationPrompt,
@@ -22,9 +23,15 @@ const ANTHROPIC_VERSION = '2023-06-01';
 // used to apply a catch-all [[headers]] rule to every path including this
 // function, forcing Netlify's edge to buffer the response to attach headers
 // and silently reintroducing the platform's buffered-invocation timeout.
-// Case generation is also split into two calls (newCaseCore, newCaseDetail)
-// so each stays safely under that ceiling even in a worst-case fully-
-// buffered scenario, independent of whether streaming reaches the client.
+// Case generation is also split into up to three calls (newCaseCore,
+// newCaseDetail, and — Dread tone only — newCasePhenomena) so each stays
+// safely under that ceiling even in a worst-case fully-buffered scenario,
+// independent of whether streaming reaches the client. newCaseDetail on its
+// own hit stop_reason=max_tokens at 1800 tokens once Dread's apparent-
+// phenomena requirement was folded in (~40s elapsed) — splitting phenomena
+// into their own call, rather than raising the cap, keeps every call's
+// worst-case duration well clear of the 60s ceiling instead of trading one
+// timeout risk for another.
 export default async (req) => {
   if (req.method !== 'POST') {
     return jsonResponse(405, { error: 'method_not_allowed' });
@@ -56,15 +63,26 @@ export default async (req) => {
       break;
     }
     case 'newCaseDetail': {
-      const { caseFile, tone, detectives = [] } = body;
+      const { caseFile, detectives = [] } = body;
       prompt = buildNewCaseDetailPrompt({
         det1: detectives[0] || 'Detective One',
         det2: detectives[1] || 'Detective Two',
         coreCaseFileJson: JSON.stringify(caseFile),
-        tone: tone || 'straight',
       });
       maxTokens = 1800;
       // no narrationField: same reasoning as newCaseCore
+      break;
+    }
+    case 'newCasePhenomena': {
+      const { caseFile, detectives = [] } = body;
+      prompt = buildNewCasePhenomenaPrompt({
+        det1: detectives[0] || 'Detective One',
+        det2: detectives[1] || 'Detective Two',
+        caseFileJson: JSON.stringify(caseFile),
+      });
+      maxTokens = 1000;
+      // no narrationField: same reasoning as newCaseCore. Dread tone only —
+      // the frontend never sends this request type for a straight case.
       break;
     }
     case 'caseOpening': {
@@ -136,10 +154,10 @@ export default async (req) => {
 // narrationField names the top-level JSON string key (e.g. "narration",
 // "openingNarration", "verdictNarration") whose value should be surfaced
 // progressively for typewriter-by-stream rendering. It's undefined for
-// newCaseCore/newCaseDetail, whose caseFile pieces are data and never shown
-// as prose. requestType is passed through purely for the elapsedMs log line
-// below, so a slow call is traceable to which of the (now five) request
-// types it was.
+// newCaseCore/newCaseDetail/newCasePhenomena, whose caseFile pieces are data
+// and never shown as prose. requestType is passed through purely for the
+// elapsedMs log line below, so a slow call is traceable to which of the (now
+// six) request types it was.
 function streamResult(prompt, maxTokens, narrationField, requestType) {
   const encoder = new TextEncoder();
 
@@ -190,10 +208,10 @@ function streamResult(prompt, maxTokens, narrationField, requestType) {
 
 // Incrementally extracts the decoded value of one top-level JSON string
 // field (e.g. "narration") as raw model output streams in piece by piece.
-// Scoped deliberately narrow: our four response shapes always put the
-// narration-bearing field first and it's always a plain string (never
-// nested), so a small buffer-and-rescan state machine is enough — no need
-// for a general streaming JSON parser.
+// Scoped deliberately narrow: our three narration-bearing response shapes
+// (caseOpening, turn, accusation) always put the narration field first and
+// it's always a plain string (never nested), so a small buffer-and-rescan
+// state machine is enough — no need for a general streaming JSON parser.
 class JsonStringFieldStreamer {
   constructor(fieldName) {
     this.needle = `"${fieldName}"`;
