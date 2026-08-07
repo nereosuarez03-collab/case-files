@@ -10,9 +10,9 @@ This document is the full brief for Stage 1. Build exactly this. Do not add feat
 
 - Vanilla HTML, CSS, JS. Single-page PWA. No frameworks, no build step. (This governs the deployed app only. A `package.json` exists at the repo root purely to declare Playwright as a devDependency for the regression test in `tests/` — Netlify's build never runs `npm install`, so it has no effect on what ships; see section 2.)
 - Hosting: Netlify with auto-deploy from GitHub `main`.
-- One Netlify Function (`netlify/functions/gm.mjs`) is the only backend. It holds the API key (env var `ANTHROPIC_API_KEY`) and proxies calls to the Anthropic API. The key must never reach the browser. It is a Netlify Functions v2 streaming function (ESM `export default`, returns a `Response` whose body is a `ReadableStream`) — the open connection is what lets a slow generation run past the platform's synchronous invocation limit instead of being killed mid-response (see section 5).
+- One Netlify Function (`netlify/functions/gm.mjs`) is the only backend. It holds the API key (env var `ANTHROPIC_API_KEY`) and proxies calls to the Anthropic API. The key must never reach the browser. It is a Netlify Functions v2 streaming function (ESM `export default`, returns a `Response` whose body is a `ReadableStream`) — the open connection is what lets a slow generation run past the platform's synchronous invocation limit instead of being killed mid-response (see section 5). This alone was found not to be sufficient in practice: `netlify.toml`'s `[[headers]]` rules must also avoid matching `/.netlify/functions/*`, since Netlify's edge merges header rules onto the origin response, which requires buffering the function's response first — silently defeating the streamed `Response` and reintroducing the platform's buffered-invocation timeout (see `netlify.toml`). As a second, independent line of defense, case generation is split into two calls (`newCaseCore`, `newCaseDetail`; see section 5 and 7) each capped well under the timeout, so generation stays safe even in a worst-case fully-buffered scenario.
 - Persistence: localStorage only. Keys: `cf-settings`, `cf-current-game`, `cf-archive`. Never rename these later without a migration function.
-- Model: `claude-sonnet-4-6`. `max_tokens`: 2800 for the case skeleton, 1000 for the case opening, 1200 for turns, 1800 for accusation (raised from 1500 to make room for `roadsNotTaken`). Case generation stays split across two calls (see section 5) even though streaming removes the invocation-length ceiling, because each call is still a separate, independently-retryable unit of work. One Anthropic call per function invocation, no in-function retries — recovery is the frontend's retry button, not a second attempt in gm.mjs.
+- Model: `claude-sonnet-4-6`. `max_tokens`: 1800 for the case core, 1800 for the case detail pass, 1000 for the case opening, 1200 for turns, 1800 for accusation (raised from 1500 to make room for `roadsNotTaken`). Case generation is split across two calls (see section 5) both for the timeout margin described above and because each call is a separate, independently-retryable unit of work. One Anthropic call per function invocation, no in-function retries — recovery is the frontend's retry button, not a second attempt in gm.mjs. `gm.mjs` logs `elapsedMs`, tagged with the request type, for every Anthropic call so a slow call is traceable to which of the five request types it was.
 - Players: exactly two detectives sharing one screen (they are on a video call together). No accounts, no auth, no multiplayer sync.
 
 ## 2. Repo and files
@@ -22,7 +22,7 @@ This document is the full brief for Stage 1. Build exactly this. Do not add feat
 /style.css
 /app.js
 /netlify/functions/gm.mjs
-/netlify/functions/prompts.mjs   <- exports the four prompt templates (section 7); lives next to gm.mjs
+/netlify/functions/prompts.mjs   <- exports the five prompt templates (section 7); lives next to gm.mjs
                                      because Netlify bundles each function in isolation — a relative
                                      import can't reach outside its own function's directory
 /manifest.webmanifest
@@ -38,8 +38,8 @@ This document is the full brief for Stage 1. Build exactly this. Do not add feat
 ## 3. Game flow (Stage 1 = Deduction Mode only)
 
 1. **Home screen.** Logo, "New Case" button, "Continue Case" (if `cf-current-game` exists), "Archive" list of finished cases.
-2. **Setup screen.** Two name fields (Detective 1 / Detective 2, prefilled from `cf-settings` after first game). A "case flavor" selector: Murder / Disappearance / Heist / Surprise us. A **duration** choice: Express (48 in-story hours) or Full (72 hours), default Express — stored as `clockBudgetHours` in game state (see section 4) and sent with every `turn` request to pace evidence reveal and end-game convergence pressure against the in-story case clock (see section 7.3). A **tone** choice: Straight (default) or Dread — Dread generates the case around isolation and includes "apparent phenomena" that always resolve to a rational, human cause; see section 7.1 and 7.3. Optional free-text field: "Anything you want in this case?" Then "Open the case file."
-3. **Case generation.** Two calls to the function, back to back under one continuous loading state (see section 6): `type: "newCaseSkeleton"` generates the hidden case file (now including a three-act pacing plan — see section 7.1), then `type: "caseOpening"` generates the opening scene from it. Loading messages show until the opening narration's first streamed delta arrives, then the typewriter loading state is replaced by the narration itself growing into a case-file page live as the model streams it (see section 5 and 6). The case file is never rendered anywhere in the UI, not even in a debug view.
+2. **Setup screen.** Two name fields (Detective 1 / Detective 2, prefilled from `cf-settings` after first game). A "case flavor" selector: Murder / Disappearance / Heist / Surprise us. A **duration** choice: Express (48 in-story hours) or Full (72 hours), default Express — stored as `clockBudgetHours` in game state (see section 4) and sent with every `turn` request to pace evidence reveal and end-game convergence pressure against the in-story case clock (see section 7.4). A **tone** choice: Straight (default) or Dread — Dread generates the case around isolation and includes "apparent phenomena" that always resolve to a rational, human cause; see section 7.1, 7.2, and 7.4. Optional free-text field: "Anything you want in this case?" Then "Open the case file."
+3. **Case generation.** Three calls to the function, back to back under one continuous loading state (see section 6): `type: "newCaseCore"` generates the core of the hidden case file (identity, cast, solution, clock, posture — see section 7.1), then `type: "newCaseDetail"` takes that core and generates the investigable surface on top of it (evidence map, three-act pacing plan, and — Dread only — apparent phenomena — see section 7.2), then `type: "caseOpening"` generates the opening scene from the merged case file. Only `caseOpening` streams narration; the core and detail calls carry no narration field, since a case file is data, never shown as prose. Loading messages show until the opening narration's first streamed delta arrives, then the typewriter loading state is replaced by the narration itself growing into a case-file page live as the model streams it (see section 5 and 6). The case file is never rendered anywhere in the UI, not even in a debug view.
 4. **Investigation loop.** A **clock bar** sits above the turn feed: the in-story day and time (`currentTime`, GM-authored, freeform but terse — e.g. "Day 2, 3:15 AM") on the left, hours remaining on the right, both in the typewriter label style; it turns `--thread` red once 12 hours or fewer remain, and updates after every turn. Each turn shows:
    - The narration for the current scene, rendered as a typed case-file page, its text growing progressively as the model streams it — see section 5 and 6.
    - At most 3 tappable **lead cards** suggested by the GM (2 is fine): terse, neutral phrases naming a person, place, or record ("The boathouse," "Carolyn's phone records") — never a conclusion, an urgency word, or an implied ranking, and shuffled so card order carries no signal. No lead may name, and no narration may reference as already known, a person not yet introduced in narration.
@@ -66,8 +66,9 @@ Mode selection UI (Deduction vs Branching) should exist on the setup screen, but
   "hoursElapsed": 4,
   "currentTime": "Day 1, 1:40 AM",
   "tone": "straight",
-  "caseFile": { /* hidden skeleton, verbatim from newCaseSkeleton, includes actPlan/posture/
-                   caseStart/deadlineEvent (and apparentPhenomena for Dread), never displayed */ },
+  "caseFile": { /* hidden case file, the client-side merge of newCaseCore's response (identity,
+                   cast, solution, posture, caseStart, deadlineEvent) and newCaseDetail's response
+                   (evidenceMap, actPlan, and apparentPhenomena for Dread), never displayed */ },
   "recap": "GM-maintained running summary of the investigation so far",
   "turns": [
     { "role": "players", "action": "Walk the scene" },
@@ -80,26 +81,27 @@ Mode selection UI (Deduction vs Branching) should exist on the setup screen, but
 
 Context management: every `turn` request sends the hidden `caseFile`, the `recap`, and only the **last 6 turns** verbatim. The GM returns an updated `recap` each turn; store it. This keeps token cost flat no matter how long the case runs.
 
-Case clock: `clockBudgetHours` (48 for Express, 72 for Full) is fixed at case creation from the setup screen's duration choice. `hoursElapsed` accumulates the `hoursSpent` each turn response returns; `currentTime` is replaced each turn by the response's `currentTime` (a GM-authored display string — the frontend never does calendar arithmetic on it, since its format isn't guaranteed beyond "terse"). `hoursRemaining` (`clockBudgetHours - hoursElapsed`, floored at 0) and `currentAct` are derived, not stored: `act3` at 12 hours remaining or fewer, `act1` below 1/3 elapsed, `act2` otherwise. These three — `clockBudgetHours`, `hoursRemaining`, `currentAct` — are sent with every `turn` request, along with `tone` (fixed at case creation, same for `newCaseSkeleton` and `caseOpening` too), so the GM can pace evidence reveal, end-game convergence pressure, and (for Dread) apparent-phenomenon restraint (section 7.3).
+Case clock: `clockBudgetHours` (48 for Express, 72 for Full) is fixed at case creation from the setup screen's duration choice. `hoursElapsed` accumulates the `hoursSpent` each turn response returns; `currentTime` is replaced each turn by the response's `currentTime` (a GM-authored display string — the frontend never does calendar arithmetic on it, since its format isn't guaranteed beyond "terse"). `hoursRemaining` (`clockBudgetHours - hoursElapsed`, floored at 0) and `currentAct` are derived, not stored: `act3` at 12 hours remaining or fewer, `act1` below 1/3 elapsed, `act2` otherwise. These three — `clockBudgetHours`, `hoursRemaining`, `currentAct` — are sent with every `turn` request, along with `tone` (fixed at case creation, same for `newCaseCore`, `newCaseDetail`, and `caseOpening` too), so the GM can pace evidence reveal, end-game convergence pressure, and (for Dread) apparent-phenomenon restraint (section 7.4).
 
 ## 5. Function API (`/.netlify/functions/gm`)
 
-`POST` JSON, always answered with a streamed `Response` (`content-type: application/x-ndjson`), even for fast calls — the frontend's reader loop is the only consumer, so there's one code path regardless of how long generation takes. Four request types. The function builds the prompt from the templates in section 7, and calls the Anthropic API once with `stream: true`. No in-function retries — one Anthropic call per invocation. The function logs `elapsedMs` and the response's `stop_reason` on every call, and the raw error body on a non-2xx or a mid-stream `error` event.
+`POST` JSON, always answered with a streamed `Response` (`content-type: application/x-ndjson`), even for fast calls — the frontend's reader loop is the only consumer, so there's one code path regardless of how long generation takes. Five request types. The function builds the prompt from the templates in section 7, and calls the Anthropic API once with `stream: true`. No in-function retries — one Anthropic call per invocation. The function logs `elapsedMs`, tagged with the request type, and the response's `stop_reason` on every call, and the raw error body on a non-2xx or a mid-stream `error` event.
 
 **Response body (NDJSON).** Each line is one JSON object, newline-terminated:
 - `{ "type": "progress" }` — written on every streamed text delta from Anthropic while generation is in flight. Pure keep-alive / liveness signal; the frontend ignores the contents. This is what keeps the connection alive past the platform's synchronous invocation limit — bytes keep flowing instead of the function going silent until it returns.
-- `{ "type": "narration-delta", "text": "..." }` — written alongside `progress`, for request types that have a narration-bearing field (`caseOpening`, `turn`, `accusation` — not `newCaseSkeleton`, whose case file is data and never shown as prose). The function incrementally decodes that field's string value out of the still-streaming JSON as it arrives (see `JsonStringFieldStreamer` in gm.mjs) and forwards each newly-decoded slice as plain text. This is what the frontend renders progressively into the case-file page (typewriter-by-stream) instead of showing a loading animation for the whole call.
+- `{ "type": "narration-delta", "text": "..." }` — written alongside `progress`, for request types that have a narration-bearing field (`caseOpening`, `turn`, `accusation` — not `newCaseCore` or `newCaseDetail`, whose case file pieces are data and never shown as prose). The function incrementally decodes that field's string value out of the still-streaming JSON as it arrives (see `JsonStringFieldStreamer` in gm.mjs) and forwards each newly-decoded slice as plain text. This is what the frontend renders progressively into the case-file page (typewriter-by-stream) instead of showing a loading animation for the whole call.
 - `{ "type": "result", "payload": {...} }` — written exactly once, as the last line, immediately before the stream closes. `payload` is either the successful response shape from the table below, or one of the two error shapes. Leads, recap, score, trueSolution, epilogue, and roadsNotTaken are only ever known once the JSON is complete, so they arrive here — never as deltas.
 
 Two failure modes, both delivered as a `result` line with `payload: { error: "..." }`, and both given the same frontend handling: a "Static on the radio, try again" state with a retry button that resends the same request.
 - `stop_reason === "max_tokens"`: the response was truncated before it could complete. Delivered as `{ error: "gm_truncated" }` without attempting to parse the accumulated text — a truncated response can't reliably produce valid JSON (and, per the case below, isn't trusted even if it happens to), so trying is wasted work.
 - Anything else that isn't valid JSON once the stream completes, a non-2xx from Anthropic, or a mid-stream SSE `error` event: `{ error: "gm_failed" }`.
 
-New-case generation is split into two calls, independent of the streaming transport: `newCaseSkeleton` generates the hidden case file only (terse, information-dense fields — no prose), then `caseOpening` takes that case file and generates the narrated opening scene. The frontend runs them back to back under one continuous loading state and retries each independently — a failed `caseOpening` call resends only that request against the already-generated case file, it does not regenerate the skeleton.
+New-case generation is split into three calls, independent of the streaming transport and each individually well under the platform's timeout even in a worst-case fully-buffered response: `newCaseCore` generates the identity/cast/solution/clock/posture core of the hidden case file (terse, information-dense fields — no prose), `newCaseDetail` takes that core as context and generates the investigable surface on top of it (evidence map, act plan, and — Dread only — apparent phenomena), then `caseOpening` takes the merged case file and generates the narrated opening scene. The frontend runs the three back to back under one continuous loading state and retries each independently — a failed `newCaseDetail` call resends only that request against the already-generated core, it does not regenerate the core; a failed `caseOpening` call doesn't regenerate either earlier step.
 
 | type | payload in | response out |
 |---|---|---|
-| `newCaseSkeleton` | `{ detectives, flavor, tone, customRequest }` | `{ caseFile }` |
+| `newCaseCore` | `{ detectives, flavor, tone, customRequest }` | `{ caseFile }` (core fields only) |
+| `newCaseDetail` | `{ caseFile, detectives, tone }` (core `caseFile` as context) | `{ evidenceMap, actPlan }` (plus `apparentPhenomena` for Dread) |
 | `caseOpening` | `{ caseFile, detectives, tone }` | `{ openingNarration, leads, recap }` |
 | `turn` | `{ caseFile, recap, recentTurns, action, detectives, turnCount, clockBudgetHours, hoursRemaining, currentAct, tone }` | `{ narration, leads, recap, hoursSpent, currentTime }` |
 | `accusation` | `{ caseFile, recap, accusation: { killer, method, motive }, detectives }` | `{ verdictNarration, score: { killer, method, motive }, trueSolution, epilogue, roadsNotTaken }` |
@@ -120,14 +122,15 @@ Subject: a nighttime case file shared by two people on a video call. The UI shou
 
 ## 7. Game-master prompts
 
-These four templates live in the function. `{{placeholders}}` are interpolated. All four end by demanding raw JSON with no markdown fences and no text outside the JSON object. The skeleton, opening, and turn templates additionally branch on `{{tone}}` (`"straight"` or `"dread"`) — the tone-only text is shown separately after each base template, exactly where the builder function inserts it.
+These five templates live in `prompts.mjs`. `{{placeholders}}` are interpolated. All five end by demanding raw JSON with no markdown fences and no text outside the JSON object. The core, detail, opening, and turn templates additionally branch on `{{tone}}` (`"straight"` or `"dread"`) — the tone-only text is shown separately after each base template, exactly where the builder function inserts it.
 
-### 7.1 Case skeleton (`newCaseSkeleton`)
+### 7.1 Case core (`newCaseCore`)
 
 ```
-You are the case architect for a two-player detective game. Generate a complete,
-self-consistent crime case that will be narrated over many turns. The players
-never see this file; it is the hidden ground truth the narrator must obey.
+You are the case architect for a two-player detective game. Generate the
+core of a complete, self-consistent crime case that will be narrated over
+many turns and finished with a second detail pass. The players never see
+this file; it is the hidden ground truth the narrator must obey.
 
 Detectives: {{det1}} and {{det2}}.
 Requested flavor: {{flavor}}. Tone: {{tone}}. Player request to honor if present: "{{customRequest}}".
@@ -141,14 +144,6 @@ Requirements:
   of those fields is one short sentence.
 - A hidden timeline of the crime night: 6 lines maximum, one line each,
   minute-level where it matters.
-- An evidence map of exactly 8 clues: each has where it is found, what it
-  truly points to, and whether it is a red herring, one line each. At least
-  2 red herrings. Clues must make the case FAIRLY solvable: a careful player
-  following real clues can identify killer, method, and motive.
-- One piece of physical evidence must contradict the killer's alibi.
-- A three-act plan for pacing, one line each: act1 (the scene and the
-  suspects come into view), act2 (contradictions surface and alibis start to
-  strain), act3 (the endgame — pressure converges toward an accusation).
 - A culprit posture, chosen to fit who this culprit actually is: "passive"
   (stays hidden, no counter-moves), "reactive" (from act2, destroys
   evidence, pressures witnesses, changes routine as the detectives close
@@ -164,9 +159,8 @@ Requirements:
   runs out."
 - What makes this case good: a motive rooted in a personal wound, not only
   mechanics; a culprit whose competence explains why they weren't caught
-  earlier; at least one thread that can be permanently lost if not pursued
-  in time; a solution whose emotional logic lands when revealed, not just
-  its evidentiary logic.[DREAD REQUIREMENT — see below, `tone: "dread"` only]
+  earlier; a solution whose emotional logic will land when it's eventually
+  revealed, not just its evidentiary logic.[DREAD REQUIREMENT — see below, `tone: "dread"` only]
 - Every field in this JSON is terse and information-dense: one short
   sentence each, no prose flourishes, no scene-setting language anywhere in
   the case file. This is a data file, not narration.
@@ -182,40 +176,76 @@ Respond with ONLY this JSON:
                     "alibi": "", "secret": "", "isCulprit": false } ],
     "solution": { "killer": "", "accomplice": null, "method": "", "motive": "",
                   "timeline": "" },
-    "evidenceMap": [ { "clue": "", "location": "", "pointsTo": "",
-                       "redHerring": false } ],
-    "actPlan": { "act1": "", "act2": "", "act3": "" },
     "posture": "passive",
     "caseStart": "",
-    "deadlineEvent": ""[DREAD SCHEMA ADDITION — see below, `tone: "dread"` only]
+    "deadlineEvent": ""
   }
 }
 ```
 
-**When `tone` is `"dread"`,** the requirement bullet marked above is this text, inserted right before the "terse and information-dense" bullet:
+**When `tone` is `"dread"`,** the requirement bullet marked above is this text, appended right after the "what makes this case good" bullet, before the "terse and information-dense" bullet:
 
 ```
 - Dread tone: generate the case around isolation — a place with a history,
   a community that won't talk, a prior incident that echoes into this one.
-  Include 3 to 5 "apparent phenomena": events that feel impossible (a knock
+  Dread cases skew reactive or hostile posture.
+```
+
+### 7.2 Case detail (`newCaseDetail`)
+
+```
+You are the case architect finishing a detective case for two players sharing
+one screen: {{det1}} and {{det2}}. Below is the core of the case already
+established — ground truth you must stay perfectly consistent with. Build the
+investigable surface on top of it: the evidence and the pacing (and, if this
+is a Dread case, what feels impossible).
+
+CORE CASE FILE: {{coreCaseFileJson}}
+
+Requirements:
+- An evidence map of exactly 8 clues: each has where it is found, what it
+  truly points to, and whether it is a red herring, one line each. At least
+  2 red herrings. Clues must make the case FAIRLY solvable: a careful player
+  following real clues can identify killer, method, and motive.
+- One piece of physical evidence must contradict the killer's alibi.
+- At least one clue or thread that can be permanently lost if the detectives
+  don't pursue it in time.
+- A three-act plan for pacing, one line each: act1 (the scene and the
+  suspects come into view), act2 (contradictions surface and alibis start to
+  strain), act3 (the endgame — pressure converges toward an accusation).[DREAD REQUIREMENT — see below, `tone: "dread"` only]
+- Every field in this JSON is terse and information-dense: one short
+  sentence each, no prose flourishes, no scene-setting language anywhere.
+  This is a data file, not narration.
+
+Respond with ONLY this JSON:
+{
+  "evidenceMap": [ { "clue": "", "location": "", "pointsTo": "",
+                     "redHerring": false } ],
+  "actPlan": { "act1": "", "act2": "", "act3": "" }[DREAD SCHEMA ADDITION — see below, `tone: "dread"` only]
+}
+```
+
+**When `tone` is `"dread"`,** the requirement bullet marked above is this text, appended right after the three-act-plan bullet:
+
+```
+- Include 3 to 5 "apparent phenomena": events that feel impossible (a knock
   in an empty house, a voice, a cold touch, a light that shouldn't be on),
   each paired with its concrete human explanation, hidden until surfaced.
   The rules of any case still apply in full: one true culprit, fair
   evidence, a fully rational solution, no supernatural cause, ever.
   Restraint is the rule — dread comes from what is withheld, sound, and
-  implication, never escalating spectacle or gore. Dread cases skew
-  reactive or hostile posture.
+  implication, never escalating spectacle or gore.
 ```
 
 and the JSON schema addition marked above is:
 
 ```
-    "apparentPhenomena": [ { "phenomenon": "", "explanation": "" } ]
+  "apparentPhenomena": [ { "phenomenon": "", "explanation": "" } ]
 ```
 
-(as a sibling key of `deadlineEvent`, i.e. caseFile's last key becomes `apparentPhenomena` instead of `deadlineEvent` closing the object).
+(as a sibling key of `actPlan`, i.e. the detail response's last key becomes `apparentPhenomena` instead of `actPlan` closing the object). The frontend merges `newCaseDetail`'s response into the core `caseFile` client-side (`evidenceMap`, `actPlan`, and `apparentPhenomena` if present) before generating the opening.
 
-### 7.2 Case opening (`caseOpening`)
+### 7.3 Case opening (`caseOpening`)
 
 ```
 You are the game master opening a detective case for two players sharing one
@@ -243,7 +273,7 @@ Respond with ONLY this JSON:
 
 > Lean into the isolation and quiet unease of a Dread case — no apparent phenomenon needs to appear yet; that is for later turns.
 
-### 7.3 Turn narration (`turn`)
+### 7.4 Turn narration (`turn`)
 
 ```
 You are the game master narrating a detective case for two players sharing one
@@ -333,7 +363,7 @@ Respond with ONLY this JSON:
   phenomena have appeared and which have been explained.
 ```
 
-### 7.4 Accusation (`accusation`)
+### 7.5 Accusation (`accusation`)
 
 ```
 You are the game master resolving the final accusation of a detective case.
@@ -378,7 +408,7 @@ Respond with ONLY this JSON:
 
 ## 8. Acceptance criteria (Stage 1 done means)
 
-1. New case generates via the skeleton + opening calls; hidden case file never appears in the DOM, console logs, or network responses beyond the function round-trip.
+1. New case generates via the core + detail + opening calls; hidden case file never appears in the DOM, console logs, or network responses beyond the function round-trip.
 2. Full loop playable on a phone: open case, 10+ turns mixing lead taps and free text, accusation, verdict, archive entry.
 3. Closing the tab mid-case and reopening resumes exactly where it was via "Continue Case."
 4. API key only in the Netlify env; frontend has zero secrets.
@@ -391,7 +421,7 @@ Respond with ONLY this JSON:
 11. The verdict screen shows a "The Threads You Left Hanging" section whenever the accusation response includes `roadsNotTaken`, and the archive entry retains it.
 12. When `hoursElapsed` reaches `clockBudgetHours`, the app skips the normal game screen and opens the accusation screen automatically, showing the deadline turn's narration inline above the form; "Continue Case" on an already-expired game does the same.
 13. Every generated case has a `posture` (`passive` | `reactive` | `hostile`) and the turn prompt is told to honor it; a Dread-tone case additionally carries 3-5 `apparentPhenomena`, each with a human explanation, and the turn prompt carries the one-per-act restraint rule.
-14. No lead card or narration line references a named person before that person has appeared in narration — enforced entirely by the turn prompt's cast-introduction rule (section 7.3); there is no client-side filtering, since the frontend renders whatever the model returns.
+14. No lead card or narration line references a named person before that person has appeared in narration — enforced entirely by the turn prompt's cast-introduction rule (section 7.4); there is no client-side filtering, since the frontend renders whatever the model returns.
 
 ## 9. Out of scope for Stage 1
 
