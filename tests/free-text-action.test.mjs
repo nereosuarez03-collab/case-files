@@ -33,7 +33,7 @@ const MIME = {
   '.png': 'image/png',
 };
 
-const SKELETON = {
+const CORE = {
   caseFile: {
     caseNumber: '26-TEST',
     title: 'The Test Fixture Case',
@@ -41,9 +41,15 @@ const SKELETON = {
     victim: { name: 'Victim', age: 40, description: 'x' },
     suspects: [{ name: 'Suspect One', age: 35, relation: 'Colleague', motive: 'm', alibi: 'a', secret: 's', isCulprit: true }],
     solution: { killer: 'Suspect One', accomplice: null, method: 'm', motive: 'm', timeline: 't' },
-    evidenceMap: [{ clue: 'c', location: 'l', pointsTo: 'p', redHerring: false }],
-    actPlan: { act1: 'a1', act2: 'a2', act3: 'a3' },
+    posture: 'passive',
+    caseStart: 'Day 1, 9:00 PM',
+    deadlineEvent: 'The suspect skips town.',
   },
+};
+
+const DETAIL = {
+  evidenceMap: [{ clue: 'c', location: 'l', pointsTo: 'p', redHerring: false }],
+  actPlan: { act1: 'a1', act2: 'a2', act3: 'a3' },
 };
 
 let lastTurnRequestBody = null;
@@ -59,8 +65,10 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       const parsed = JSON.parse(body);
       res.writeHead(200, { 'content-type': 'application/x-ndjson' });
-      if (parsed.type === 'newCaseSkeleton') {
-        res.end(ndjson(SKELETON));
+      if (parsed.type === 'newCaseCore') {
+        res.end(ndjson(CORE));
+      } else if (parsed.type === 'newCaseDetail') {
+        res.end(ndjson(DETAIL));
       } else if (parsed.type === 'caseOpening') {
         res.end(ndjson({ openingNarration: 'The office is quiet. A body lies by the desk.', leads: ['Lead A', 'Lead B'], recap: 'r' }));
       } else if (parsed.type === 'turn') {
