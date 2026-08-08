@@ -80,6 +80,19 @@ function datelineHtml(text) {
   return text ? `<span class="dateline">${esc(text)}</span>` : '';
 }
 
+// Fisher-Yates. Used to randomize the suspects list wherever it's shown to
+// players, so a suspect's position can never itself be a tell — the same
+// fairness concern Stage 2.0a addressed for screen-time, applied to display
+// order (see SPEC.md's fairness rules).
+function shuffleArray(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 function formatDate(iso) {
   try {
     return new Date(iso).toLocaleDateString(undefined, {
@@ -554,9 +567,16 @@ function turnEntryHtml(t, game) {
 function renderClockBar(game) {
   const hoursLeft = hoursRemainingFor(game);
   const urgent = hoursLeft <= 12;
+  // securedEvidence holds the exact clue text of each admissible clue the
+  // GM has confirmed the detectives surfaced (see buildTurnPrompt's SECURED
+  // EVIDENCE tracking rule) — 3 admissible clues always exist per case, so
+  // its length is the count shown here. No explanation of what counts is
+  // ever shown; the number alone is the DA's pressure made visible.
+  const securedCount = (game.securedEvidence || []).length;
   return `
     <div class="clock-bar${urgent ? ' urgent' : ''}">
       <span>${esc(game.currentTime || '')}</span>
+      <span class="evidence-count">Evidence ${securedCount}/3</span>
       <span class="clock-hours">${hoursLeft}h left</span>
     </div>
   `;
@@ -638,6 +658,7 @@ function submitAction(actionText) {
     caseFile: game.caseFile,
     recap: game.recap,
     mentionTally: game.mentionTally || {},
+    securedEvidence: game.securedEvidence || [],
     recentTurns,
     action: text,
     detectives: game.detectives,
@@ -693,6 +714,7 @@ function onTurnSuccess(data, turnCount) {
   game.turns.push({ role: 'gm', narration: data.narration, leads: data.leads || [], currentTime: newCurrentTime });
   game.recap = data.recap || game.recap;
   game.mentionTally = data.mentionTally || game.mentionTally || {};
+  game.securedEvidence = Array.isArray(data.securedEvidence) ? data.securedEvidence : (game.securedEvidence || []);
   game.turnCount = turnCount;
   game.hoursElapsed = (game.hoursElapsed || 0) + (Number(data.hoursSpent) || 0);
   game.currentTime = newCurrentTime;
@@ -724,7 +746,12 @@ function renderAccusationForm() {
   ensureAccusationForm();
   const game = state.currentGame;
   const f = state.accusationForm;
-  const suspects = (game.caseFile.suspects || []).map((s) => s.name).filter(Boolean);
+  // Shuffled for display only — caseFile.suspects itself is left alone.
+  // Whatever order the model happened to generate suspects in must never
+  // leak a positional tell, so the dropdown never reflects it directly.
+  // "Someone else" is appended after, not shuffled in, since it isn't one
+  // of the real suspects.
+  const suspects = shuffleArray((game.caseFile.suspects || []).map((s) => s.name).filter(Boolean));
   const expired = isClockExpired(game);
   const lastGmTurn = expired ? [...game.turns].reverse().find((t) => t.role === 'gm') : null;
 
@@ -791,9 +818,19 @@ function submitAccusationConfirmed() {
   runStreamingRequest('accusation', {
     caseFile: game.caseFile,
     recap: game.recap,
+    securedEvidence: game.securedEvidence || [],
+    clockExpired: isClockExpired(game),
     accusation: { killer, method: f.method.trim(), motive: f.motive.trim() },
     detectives: game.detectives,
   }, onAccusationSuccess, 'accusation', game.currentTime || '');
+}
+
+// A valid postAccusationChoice needs a prompt and exactly the 2 options the
+// prompt template asks for; anything short of that (a model hiccup, or a
+// mocked response that omits it) is treated as "no decision to make" so the
+// game never gets stuck waiting on a malformed card.
+function validDecisionChoice(choice) {
+  return !!(choice && Array.isArray(choice.options) && choice.options.length === 2);
 }
 
 function onAccusationSuccess(data) {
@@ -802,30 +839,76 @@ function onAccusationSuccess(data) {
   // closing, not advancing — so the dateline carried forward onto the
   // verdict/archive pages is simply the last time the clock showed.
   const closedAt = game.currentTime || '';
-  const entry = {
-    title: game.caseFile.title,
-    caseNumber: game.caseFile.caseNumber,
-    date: new Date().toISOString(),
-    detectives: game.detectives,
-    currentTime: closedAt,
+  const choice = validDecisionChoice(data.postAccusationChoice) ? data.postAccusationChoice : null;
+
+  state.lastVerdict = {
+    verdictNarration: data.verdictNarration || '',
     score: data.score || {},
     trueSolution: data.trueSolution || '',
     epilogue: data.epilogue || '',
-    verdictNarration: data.verdictNarration || '',
     roadsNotTaken: Array.isArray(data.roadsNotTaken) ? data.roadsNotTaken : [],
+    postAccusationChoice: choice,
+    decisionIndex: null, // set once the player picks one of the two options
+    currentTime: closedAt,
+    title: game.caseFile.title,
+    caseNumber: game.caseFile.caseNumber,
+    detectives: game.detectives,
+  };
+
+  clearCurrentGame();
+  state.currentGame = null;
+  state.accusationForm = null;
+
+  // With no decision card, the ending is already final — archive now. With
+  // one, the epilogue depends on which option gets picked, so archiving
+  // waits for choosePostAccusationDecision (see the verdict screen: the
+  // epilogue and the "New Case"/"Back to Home" buttons stay hidden until
+  // then, the same "can't skip a required step" pattern as the accusation
+  // form's own required fields).
+  if (!choice) archiveVerdict(state.lastVerdict);
+
+  state.screen = 'verdict';
+  render();
+}
+
+// The chosen option's epilogueAddendum is appended to the base epilogue —
+// the decision changes the ending's final beat, it doesn't replace the
+// outcome consequences already established by the accusation's scoring.
+function finalEpilogueText(v) {
+  const base = v.epilogue || '';
+  if (v.postAccusationChoice && v.decisionIndex != null) {
+    const opt = v.postAccusationChoice.options[v.decisionIndex];
+    if (opt && opt.epilogueAddendum) return `${base}\n\n${opt.epilogueAddendum}`.trim();
+  }
+  return base;
+}
+
+function archiveVerdict(v) {
+  const entry = {
+    title: v.title,
+    caseNumber: v.caseNumber,
+    date: new Date().toISOString(),
+    detectives: v.detectives,
+    currentTime: v.currentTime,
+    score: v.score || {},
+    trueSolution: v.trueSolution || '',
+    epilogue: finalEpilogueText(v),
+    verdictNarration: v.verdictNarration || '',
+    roadsNotTaken: Array.isArray(v.roadsNotTaken) ? v.roadsNotTaken : [],
   };
 
   const archive = loadArchive();
   archive.push(entry);
   saveArchive(archive);
   state.archive = archive;
+}
 
-  clearCurrentGame();
-  state.currentGame = null;
-  state.accusationForm = null;
-
-  state.lastVerdict = { ...data, currentTime: closedAt };
-  state.screen = 'verdict';
+function choosePostAccusationDecision(index) {
+  const v = state.lastVerdict;
+  if (!v || !v.postAccusationChoice || v.decisionIndex != null) return;
+  if (!v.postAccusationChoice.options[index]) return;
+  v.decisionIndex = index;
+  archiveVerdict(v);
   render();
 }
 
@@ -837,6 +920,28 @@ function scoreLabel(val) {
   return 'Missed';
 }
 
+function decisionCardHtml(choice) {
+  return `
+    <div class="case-page decision-card">
+      <span class="stamp">Your Call</span>
+      <p class="decision-prompt">${esc(choice.prompt || '')}</p>
+      <div class="decision-options">
+        ${choice.options.map((opt, i) => `<button class="decision-option" data-action="choose-decision" data-decision-index="${i}">${esc(opt.label || '')}</button>`).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function decisionChosenHtml(choice, index) {
+  const opt = choice.options[index] || {};
+  return `
+    <div class="decision-chosen">
+      <span class="who">Your Call</span>
+      ${esc(opt.label || '')}
+    </div>
+  `;
+}
+
 function renderVerdict() {
   const v = state.lastVerdict;
   if (!v) {
@@ -845,6 +950,13 @@ function renderVerdict() {
   }
   const score = v.score || {};
   const roads = Array.isArray(v.roadsNotTaken) ? v.roadsNotTaken : [];
+  const choice = v.postAccusationChoice;
+  // With no choice to make, the ending was already final the moment the
+  // accusation resolved. With one, everything past it — epilogue, roads,
+  // the buttons to leave — waits for the player to pick, same as the
+  // accusation form itself can't be submitted with fields left blank.
+  const decided = !choice || v.decisionIndex != null;
+
   return `
     <div class="verdict-screen">
       <div class="screen-header"><h1>Verdict</h1></div>
@@ -871,11 +983,14 @@ function renderVerdict() {
         <h2>The Truth</h2>
         <p>${esc(v.trueSolution)}</p>
       </div>
-      <div class="epilogue-block">
-        <h2>Epilogue</h2>
-        <p>${esc(v.epilogue)}</p>
-      </div>
-      ${roads.length ? `
+      ${choice ? (v.decisionIndex != null ? decisionChosenHtml(choice, v.decisionIndex) : decisionCardHtml(choice)) : ''}
+      ${decided ? `
+        <div class="epilogue-block">
+          <h2>Epilogue</h2>
+          <p>${esc(finalEpilogueText(v))}</p>
+        </div>
+      ` : ''}
+      ${decided && roads.length ? `
         <div class="roads-block">
           <h2>The Threads You Left Hanging</h2>
           <ul class="roads-list">
@@ -883,10 +998,12 @@ function renderVerdict() {
           </ul>
         </div>
       ` : ''}
-      <div class="verdict-actions">
-        <button class="btn btn-primary btn-block" data-action="verdict-new-case">New Case</button>
-        <button class="btn btn-secondary btn-block" data-action="verdict-back-home">Back to Home</button>
-      </div>
+      ${decided ? `
+        <div class="verdict-actions">
+          <button class="btn btn-primary btn-block" data-action="verdict-new-case">New Case</button>
+          <button class="btn btn-secondary btn-block" data-action="verdict-back-home">Back to Home</button>
+        </div>
+      ` : ''}
     </div>
   `;
 }
@@ -1041,6 +1158,9 @@ function onRootClick(e) {
       break;
     case 'confirm-accusation-yes':
       submitAccusationConfirmed();
+      break;
+    case 'choose-decision':
+      choosePostAccusationDecision(Number(el.dataset.decisionIndex));
       break;
     case 'confirm-accusation-no':
     case 'dialog-overlay':
@@ -1245,6 +1365,11 @@ function onCaseOpeningSuccess(data, caseFile, originalPayload) {
     // opening dispatch doesn't produce one yet; it starts empty and the
     // first turn response fills it in.
     mentionTally: {},
+    // Exact clue text of each admissible evidenceMap clue confirmed
+    // surfaced in narration so far — GM-maintained pass-through state, same
+    // pattern as mentionTally. Its length is what the header's evidence
+    // counter shows; there are always exactly 3 admissible clues per case.
+    securedEvidence: [],
     turns: [{ role: 'gm', narration: data.openingNarration, leads: data.leads || [], currentTime: caseFile.caseStart || '' }],
     turnCount: 0,
     status: 'active',

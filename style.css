@@ -450,6 +450,10 @@ a { color: inherit; }
   flex-shrink: 0;
 }
 
+.clock-bar .evidence-count {
+  flex-shrink: 0;
+}
+
 .clock-bar.urgent {
   color: var(--thread);
 }
@@ -667,6 +671,64 @@ a { color: inherit; }
   font-family: var(--font-body);
   line-height: 1.6;
   white-space: pre-wrap;
+}
+
+/* ---------- post-accusation decision ---------- */
+/* .decision-card is a .case-page underneath (paper, stamp, rotation) —
+   these rules only add the prompt text and the two-option button stack. */
+.decision-card {
+  margin-top: 18px;
+}
+
+.decision-card .decision-prompt {
+  font-family: var(--font-body);
+  font-size: 1rem;
+  line-height: 1.5;
+  margin-bottom: 14px;
+}
+
+.decision-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.decision-option {
+  min-height: var(--tap);
+  padding: 12px 16px;
+  background: var(--ink);
+  color: var(--paper);
+  border: 1px solid rgba(239, 232, 216, 0.25);
+  border-radius: var(--radius);
+  font-family: var(--font-type);
+  font-size: 0.85rem;
+  letter-spacing: 0.01em;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.decision-option:hover { background: var(--ink-raised); transform: translateY(-1px); }
+.decision-option:active { transform: scale(0.98); }
+
+.decision-chosen {
+  margin-top: 18px;
+  background: var(--ink-raised);
+  border: 1px dashed rgba(239, 232, 216, 0.3);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  font-family: var(--font-type);
+  font-size: 0.85rem;
+  color: var(--paper);
+}
+
+.decision-chosen .who {
+  display: block;
+  font-size: 0.65rem;
+  color: var(--pencil);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
 }
 
 .roads-list {
