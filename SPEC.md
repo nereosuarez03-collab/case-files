@@ -40,15 +40,15 @@ This document is the full brief for Stage 1. Build exactly this. Do not add feat
 1. **Home screen.** Logo, "New Case" button, "Continue Case" (if `cf-current-game` exists), "Archive" list of finished cases.
 2. **Setup screen.** Two name fields (Detective 1 / Detective 2, prefilled from `cf-settings` after first game). A "case flavor" selector: Murder / Disappearance / Heist / Surprise us. A **duration** choice: Express (48 in-story hours) or Full (72 hours), default Express — stored as `clockBudgetHours` in game state (see section 4) and sent with every `turn` request to pace evidence reveal and end-game convergence pressure against the in-story case clock (see section 7.5). A **tone** choice: Straight (default) or Dread — Dread generates the case around isolation and includes "apparent phenomena" that always resolve to a rational, human cause; see section 7.1, 7.3, and 7.5. Optional free-text field: "Anything you want in this case?" Then "Open the case file."
 3. **Case generation.** Up to four calls to the function, back to back under one continuous loading state (see section 6): `type: "newCaseCore"` generates the core of the hidden case file (identity, cast, solution, clock, posture — see section 7.1), then `type: "newCaseDetail"` takes that core and generates the investigable surface on top of it (evidence map, three-act pacing plan — see section 7.2), then — Dread tone only — `type: "newCasePhenomena"` takes the merged core+detail case file and generates the apparent phenomena (see section 7.3), then `type: "caseOpening"` generates the opening scene from the fully-merged case file. Straight-tone cases skip the phenomena call entirely. Only `caseOpening` streams narration; the core, detail, and phenomena calls carry no narration field, since a case file is data, never shown as prose. Loading messages show until the opening narration's first streamed delta arrives, then the typewriter loading state is replaced by the narration itself growing into a case-file page live as the model streams it (see section 5 and 6). The case file is never rendered anywhere in the UI, not even in a debug view.
-4. **Investigation loop.** A **clock bar** sits above the turn feed: the in-story day and time (`currentTime`, GM-authored, freeform but terse — e.g. "Day 2, 3:15 AM") on the left, hours remaining on the right, both in the typewriter label style; it turns `--thread` red once 12 hours or fewer remain, and updates after every turn. Every case-file page (the opening scene, each turn, and the closed-case page on the verdict and archive-detail screens) additionally carries its own **dateline**: the `currentTime` that applied when that page happened, stamped at the top of the page itself — see section 6. Each turn shows:
+4. **Investigation loop.** A **clock bar** sits above the turn feed: the in-story day and time (`currentTime`, GM-authored, freeform but terse — e.g. "Day 2, 3:15 AM") on the left, an **evidence counter** ("Evidence 2/3", from `securedEvidence.length`) in the middle, hours remaining on the right, all three in the typewriter label style; the bar turns `--thread` red once 12 hours or fewer remain, and updates after every turn. The evidence counter shows the number plainly and nothing else — no indication of which clues count as admissible or why (section 7.5 instructs the GM never to narrate that bookkeeping either). Every case-file page (the opening scene, each turn, and the closed-case page on the verdict and archive-detail screens) additionally carries its own **dateline**: the `currentTime` that applied when that page happened, stamped at the top of the page itself — see section 6. Each turn shows:
    - The narration for the current scene, rendered as a typed case-file page, its text growing progressively as the model streams it — see section 5 and 6.
    - At most 3 tappable **lead cards** suggested by the GM (2 is fine): terse, neutral phrases naming a person, place, or record ("The boathouse," "Carolyn's phone records") — never a conclusion, an urgency word, or an implied ranking, and shuffled so card order carries no signal. No lead may name, and no narration may reference as already known, a person not yet introduced in narration. Leads also must not name the same suspect two turns running (see section 7.5) — enforced entirely by the turn prompt, not client-side.
    - A free-text input, always available: the detectives can type anything ("check her shoe size", "ping-call the burner"). Free text is a first-class action, not a fallback, sent verbatim as the turn's `action` and honored by the GM with exactly the same weight as a tapped lead. This is what makes the game feel alive.
    - A persistent **"Make an accusation"** button, always visible but visually secondary.
    Selecting a lead or submitting text sends `type: "turn"` and appends the result, which also carries `hoursSpent` (added to game state's `hoursElapsed`) and `currentTime` (the new clock display). The choice itself renders immediately as a compact marker in the turn feed (who, and what they did) before the response streams in below it — choosing one thread can close others: unpursued time-sensitive leads may resolve offstage as the hours pass (a scene gets processed by techs and comes back as a report only; a witness leaves town), acknowledged naturally in the following narration. After each new page renders (the opening scene, a turn response, or the compact choice marker), the viewport scrolls to the top of that newest page — not to the top of the whole feed, not to its bottom.
    When `hoursElapsed` reaches `clockBudgetHours`, the clock has run out: that turn's narration plays out the case file's `deadlineEvent` as actually happening, and the app skips straight to the accusation screen instead of the normal game screen — showing that final narration inline above the form (no "Back to the case" link; there is no case left to go back to) so the detectives read what forced their hand before the fields. Reopening a clock-expired case via "Continue Case" lands directly on the accusation screen the same way.
-5. **Accusation.** A form with three fields: Killer (dropdown of suspect names + "Someone else" free text), Method (free text), Motive (free text). Confirm dialog: "Close the case? The DA only gives you one shot." Sends `type: "accusation"`.
-6. **Verdict screen.** The GM's verdict narration (streamed progressively like turn narration), a scorecard (Killer / Method / Motive each marked correct, partial, or missed), the full true solution, an epilogue (3-4 lines, crime/investigation consequences only), and a closing section titled "The Threads You Left Hanging" listing the roads not taken — scaled to the scorecard: exactly 2 short atmospheric lines if all three are correct, up to 4 explanatory lines if any is partial or missed. Buttons: "New Case" and "Back to home." The finished game (title, date, detectives, score, solution, roads not taken) is appended to `cf-archive` and `cf-current-game` is cleared.
+5. **Accusation.** A form with three fields: Killer (dropdown of suspect names, shuffled to display order on every visit to this screen so position never correlates with guilt — "Someone else" free text always appended last, never shuffled in), Method (free text), Motive (free text). Confirm dialog: "Close the case? The DA only gives you one shot." Sends `type: "accusation"` with the current `securedEvidence` and whether the clock had already expired (section 7.6).
+6. **Verdict screen.** The GM's verdict narration (streamed progressively like turn narration), a scorecard (Killer / Method / Motive each marked correct, partial, or missed), and the full true solution. The accusation's outcome — conviction, technicality walk, or wrong person charged, layered with "the clock already ran out" if it applies — is decided by the GM from the killer score and `securedEvidence` (section 7.6) and expressed through `verdictNarration` and `epilogue`; there's no separate outcome field, the frontend just renders whatever comes back. Next, if the response includes a valid `postAccusationChoice` (a prompt and exactly 2 options), a **decision card** presents it in the same paper-card-and-stamp visual language as a case-file page: one final call with no correct answer, generated from the case's own facts. Tapping an option replaces the card with a compact chosen-marker and reveals the epilogue below — until then, the epilogue, "The Threads You Left Hanging," and the "New Case" / "Back to Home" buttons all stay hidden, the same required-step pattern as the accusation form's own fields. The shown epilogue is the response's base `epilogue` plus the chosen option's `epilogueAddendum`. If there's no valid `postAccusationChoice`, all of that renders immediately with no card. Then a closing section titled "The Threads You Left Hanging" lists the roads not taken — scaled to the scorecard: exactly 2 short atmospheric lines if all three are correct, up to 4 explanatory lines if any is partial or missed. Buttons: "New Case" and "Back to home." The finished game (title, date, detectives, score, solution, the final combined epilogue, roads not taken) is appended to `cf-archive` — only once the epilogue is final, i.e. immediately if there was no decision card, or the moment one is chosen — and `cf-current-game` is cleared as soon as the accusation resolves (win or lose, there's no going back to the case).
 
 Mode selection UI (Deduction vs Branching) should exist on the setup screen, but the Branching option is rendered disabled with a "Coming soon" tag. Do not implement it.
 
@@ -72,6 +72,7 @@ Mode selection UI (Deduction vs Branching) should exist on the setup screen, but
                    (apparentPhenomena), never displayed */ },
   "recap": "GM-maintained running summary of the investigation so far",
   "mentionTally": { "Suspect Name": { "turns": 2, "leads": 1 } },
+  "securedEvidence": ["Exact clue text of an admissible clue the detectives have surfaced"],
   "turns": [
     { "role": "players", "action": "Walk the scene" },
     { "role": "gm", "narration": "...", "leads": ["...", "..."], "currentTime": "Day 1, 1:40 AM" }
@@ -84,6 +85,8 @@ Mode selection UI (Deduction vs Branching) should exist on the setup screen, but
 Context management: every `turn` request sends the hidden `caseFile`, the `recap`, and only the **last 6 turns** verbatim. The GM returns an updated `recap` each turn; store it. This keeps token cost flat no matter how long the case runs.
 
 Suspect screen-time balance: `mentionTally` is a sibling of `recap`, maintained the same way — the GM returns an updated tally every `turn` response, the frontend stores it verbatim and sends it back as context on the next `turn` request (empty object `{}` at case creation; the opening dispatch doesn't populate it). It maps each suspect's name to `{ "turns": N, "leads": N }`: how many turns they've appeared by name in narration, and how many leads have named them. The turn prompt uses this to keep suspicion-worthy screen time roughly even across all four suspects through act1 and act2 — see section 7.5. The frontend never reads or computes the tally itself; it's opaque pass-through state, same as `recap`.
+
+DA evidence threshold: every generated `evidenceMap` clue carries `admissible` (section 7.2) — exactly 3 of the 8 clues per case are hard, court-usable evidence; the rest are inference, hearsay, or behavioral reads. `securedEvidence` is a sibling of `recap` and `mentionTally`, maintained the same way: an array of the exact `clue` text of each admissible clue the GM has confirmed the detectives concretely surfaced in narration (not merely referenced), returned updated every `turn` response, stored verbatim, and sent back as context on the next `turn` and on `accusation` (section 7.5, 7.6). Starts at `[]` at case creation. Its length is the number shown by the header's evidence counter ("Evidence 2/3") — there are always exactly 3 admissible clues, so no separate total needs to be tracked. The frontend never inspects which clues are admissible or computes the count from `evidenceMap` itself; `securedEvidence.length` is trusted directly, same as `mentionTally` is never recomputed client-side.
 
 Each `gm` turn entry also stores its own `currentTime` (the opening's is `caseFile.caseStart`; every later turn's is that turn response's `currentTime`) — this is what lets each case-file page show its own dateline instead of only the header clock bar reflecting the single current value (see section 6).
 
@@ -110,8 +113,8 @@ New-case generation is split into up to four calls, independent of the streaming
 | `newCaseDetail` | `{ caseFile, detectives }` (core `caseFile` as context) | `{ evidenceMap, actPlan }` |
 | `newCasePhenomena` | `{ caseFile, detectives }` (merged core+detail `caseFile` as context; Dread only) | `{ apparentPhenomena }` |
 | `caseOpening` | `{ caseFile, detectives, tone }` | `{ openingNarration, leads, recap }` |
-| `turn` | `{ caseFile, recap, mentionTally, recentTurns, action, detectives, turnCount, clockBudgetHours, hoursRemaining, currentAct, tone }` | `{ narration, leads, recap, hoursSpent, currentTime, mentionTally }` |
-| `accusation` | `{ caseFile, recap, accusation: { killer, method, motive }, detectives }` | `{ verdictNarration, score: { killer, method, motive }, trueSolution, epilogue, roadsNotTaken }` |
+| `turn` | `{ caseFile, recap, mentionTally, securedEvidence, recentTurns, action, detectives, turnCount, clockBudgetHours, hoursRemaining, currentAct, tone }` | `{ narration, leads, recap, hoursSpent, currentTime, mentionTally, securedEvidence }` |
+| `accusation` | `{ caseFile, recap, securedEvidence, clockExpired, accusation: { killer, method, motive }, detectives }` | `{ verdictNarration, score: { killer, method, motive }, trueSolution, epilogue, postAccusationChoice, roadsNotTaken }` |
 
 `score` values: `"correct" | "partial" | "missed"`.
 
@@ -124,7 +127,8 @@ Subject: a nighttime case file shared by two people on a video call. The UI shou
 - **Signature element:** every GM narration renders as a typed page clipped into the file: paper card, slightly rotated stamp reading `CASE 26-XXXX` in `--thread`, faint paper texture via CSS gradient only (no image assets). Lead cards look like index cards pinned below the page.
 - **Per-page dateline:** every case-file page additionally carries a second stamp in its opposite top corner (mirroring the case-number stamp), showing the in-story day/time that page happened at — same typewriter face, letterspaced uppercase, but quieter `--pencil` instead of `--thread`, since it's a timestamp annotation rather than an official mark, and rotated the other way for a hand-stamped feel. It shows whatever `currentTime` string the GM authored for that page verbatim — never reformatted, same as the header clock bar. This applies to the opening scene, every turn, the accusation screen's clock-expired inline narration, the verdict screen's closed-case page, and archive-detail pages; the header clock bar stays as the single always-current summary, this is the per-page historical record.
 - **Loading states:** typewriter-style text that types out, cycling short lines ("Dispatch is calling it in…", "Pulling the records…"). No spinners. This runs only until the GM's narration itself starts arriving — once the first streamed delta lands, the cycling lines are replaced in place by the narration growing directly into its case-file page (typewriter-by-stream, same paper card, same blinking `--thread` cursor at the write head). A tapped lead or submitted free-text action renders immediately as a compact dashed-border marker in the turn feed, with the next page's loading state appearing right below it — the marker, not a full-screen takeover, is what the player sees first.
-- **Case clock:** a slim bar above the turn feed, typewriter label style, letterspaced uppercase — the in-story time on the left, hours remaining on the right. Quiet `--pencil` gray normally; switches to `--thread` red once 12 hours or fewer remain, the same accent used for pressure and stamps elsewhere, so urgency reads through color the player already associates with the DA and the evidence board.
+- **Case clock:** a slim bar above the turn feed, typewriter label style, letterspaced uppercase — the in-story time on the left, an evidence counter in the middle, hours remaining on the right. Quiet `--pencil` gray normally; the whole bar (evidence counter included) switches to `--thread` red once 12 hours or fewer remain, the same accent used for pressure and stamps elsewhere, so urgency reads through color the player already associates with the DA and the evidence board.
+- **Post-accusation decision card:** the same paper-card-and-stamp language as a case-file page (it *is* one, stamped "Your Call" instead of a case number), holding a one-line prompt and two full-width option buttons stacked below it, dark chrome against the paper like other in-app buttons. Once chosen, it's replaced by a compact dashed-border marker — same construction as the turn feed's own choice markers, just not right-aligned — naming which option was picked, with the epilogue appearing directly below.
 - Dark app chrome around light paper pages. Motion minimal: pages fade-slide in, respect `prefers-reduced-motion`. Mobile-first at 380 px; it will mostly be played on phones.
 - Quality floor: keyboard focus visible, tap targets 44 px, text ≥ 16 px on paper.
 
@@ -159,6 +163,10 @@ Requirements:
   a message, a witness silenced, misdirection aimed at them). Most cases
   should be passive or reactive; reserve hostile for a culprit it genuinely
   fits.
+- The culprit occupies a structurally trusted role that makes them
+  unsuspicious by default: the one who found the body, reported it, is
+  assisting the investigation, or is a caretaker or family confidant others
+  rely on. Their trustworthiness should be structural, not merely claimed.
 - A case clock: caseStart (the in-story day and time the investigation
   begins, terse, e.g. "Day 1, 9:40 PM") and a deadlineEvent — one specific
   event invented from this case's own facts that occurs when the clock
@@ -222,6 +230,13 @@ Requirements:
   core file. Red herrings are the natural way to give innocents this: a red
   herring that points at an innocent suspect satisfies both requirements at
   once.
+- Mark exactly 3 of the 8 clues "admissible": true — hard, court-usable
+  evidence (forensics, records, documents, a physical object tied to the
+  culprit). Everything else is "admissible": false — inference, hearsay,
+  behavioral reads, anything a defense attorney would tear apart alone. At
+  least one of the 3 admissible clues must be obtainable only through a
+  time-costly action (a lab result, a warrant, a records pull) — never
+  something available on a first glance.
 - At least one clue or thread that can be permanently lost if the detectives
   don't pursue it in time.
 - A three-act plan for pacing: act1 (the scene and the suspects come into
@@ -234,7 +249,7 @@ Requirements:
 Respond with ONLY this JSON:
 {
   "evidenceMap": [ { "clue": "", "location": "", "pointsTo": "",
-                     "redHerring": false } ],
+                     "redHerring": false, "admissible": false } ],
   "actPlan": { "act1": "", "act2": "", "act3": "" }
 }
 ```
@@ -307,6 +322,7 @@ so far, and the most recent turns.
 HIDDEN CASE FILE: {{caseFileJson}}
 RECAP: {{recap}}
 MENTION TALLY: {{mentionTallyJson}}
+SECURED EVIDENCE: {{securedEvidenceJson}}
 RECENT TURNS: {{recentTurnsJson}}
 TURN NUMBER: {{turnCount}}. CLOCK: {{hoursRemaining}} hours remaining of {{clockBudgetHours}}, currently {{currentAct}}.
 THE DETECTIVES NOW: {{action}}
@@ -340,6 +356,12 @@ Rules:
   their secret, write it with the same concrete, attention-grabbing detail as
   the culprit lying well. A player's suspicion should never simply track
   whichever suspect gets the most vivid treatment.
+- Every suspect's secret must produce at least one scene, over the course of
+  the whole case, of visibly evasive behavior when it's touched — a stumble,
+  a too-quick answer, a subject change — textured exactly the same way as
+  the culprit's evasions. Track in the recap's cast-so-far note which
+  suspects still need this scene, so evasiveness stops being a tell for
+  guilt on its own.
 - Never let a lead name, or narration reference as already known, a person
   who hasn't yet been introduced in narration. Keep a "cast so far" note in
   the recap and check new leads against it.
@@ -377,15 +399,26 @@ Rules:
 - Then propose at most 3 leads (2 is fine): terse, neutral phrases naming a
   person, place, or record only ("The boathouse", "Carolyn's phone
   records") — no conclusions, no urgency words, no implied ranking by order.
-  Shuffle their order. Never reference a fact that hasn't already been
-  surfaced in narration. Leads must not name the same suspect two turns in a
-  row unless the detectives' own action this turn specifically forces it —
-  check RECENT TURNS' most recent GM turn for which suspect(s) its leads
-  named, and avoid repeating them here.
+  Shuffle their order — position must never correlate with which lead
+  matters most; don't habitually put the strongest lead first or last.
+  Never reference a fact that hasn't already been surfaced in narration.
+  Leads must not name the same suspect two turns in a row unless the
+  detectives' own action this turn specifically forces it — check RECENT
+  TURNS' most recent GM turn for which suspect(s) its leads named, and
+  avoid repeating them here.
+- Track admissible evidence separately from ordinary clues: whenever a clue
+  from the case file's evidenceMap marked "admissible": true is concretely
+  surfaced in this turn's narration — not just referenced, but established
+  as evidence now in hand — add its exact clue text to securedEvidence if
+  it isn't already there. Never remove an entry once added. Never state in
+  narration which clues are admissible, how many exist, or a running count
+  — the detectives should never see the DA's bookkeeping, only its
+  pressure.
 - Update the recap: 120 words max, neutral, cover everything discovered so
   far including this turn, a short "cast so far" list of named people
-  already introduced, and note any thread that just closed offstage. The
-  recap is your only long-term memory.
+  already introduced (noting which still need their evasion scene), and
+  note any thread that just closed offstage. The recap is your only
+  long-term memory.
 - Update mentionTally from MENTION TALLY: for every suspect named in this
   turn's narration, increment their "turns" count by 1 from the input tally;
   for every suspect named in a lead you just proposed, increment their
@@ -395,7 +428,7 @@ Rules:
 
 Respond with ONLY this JSON:
 { "narration": "", "leads": ["", "", ""], "recap": "", "hoursSpent": 0, "currentTime": "",
-  "mentionTally": { "SuspectName": { "turns": 0, "leads": 0 } } }
+  "mentionTally": { "SuspectName": { "turns": 0, "leads": 0 } }, "securedEvidence": [] }
 ```
 
 **When `tone` is `"dread"`,** this bullet is appended right after the posture bullet marked above:
@@ -416,6 +449,8 @@ You are the game master resolving the final accusation of a detective case.
 
 HIDDEN CASE FILE: {{caseFileJson}}
 RECAP: {{recap}}
+CLOCK STATUS: {{clockStatus}}
+SECURED EVIDENCE: {{securedEvidenceCount}}/3
 DETECTIVES: {{det1}} and {{det2}}
 THEIR ACCUSATION: killer: {{killer}} | method: {{method}} | motive: {{motive}}
 
@@ -427,6 +462,21 @@ Score each of the three parts against the solution:
 - "missed": wrong.
 Judge meaning, not wording. Be generous with phrasing, strict with substance.
 
+Then determine the outcome from the killer score and SECURED EVIDENCE, and
+let it drive verdictNarration, epilogue, and the post-accusation choice:
+- Correct culprit ("correct" or "partial" killer score) with SECURED
+  EVIDENCE at 3/3: the charge holds. A clean conviction.
+- Correct culprit with SECURED EVIDENCE under 3/3: charges are filed but
+  don't stick — the culprit walks on a technicality. If posture is
+  "hostile", they act again; reflect that in the epilogue.
+- Wrong culprit ("missed" killer score): an innocent is charged and the
+  real culprit goes free. State a concrete cost in the epilogue: if
+  posture is "hostile", the real culprit acts again; otherwise the case
+  goes cold. Never mock the players.
+- If CLOCK STATUS shows the clock ran out before this accusation, the case
+  file's deadlineEvent already happened without them — the worst framing,
+  layered on top of whichever outcome above applies.
+
 Then write:
 - verdictNarration (250-400 words): the arrest or the aftermath, played out
   cinematically. If they accused the wrong person, show the consequence: the
@@ -437,6 +487,13 @@ Then write:
   two or three clues that pointed there.
 - epilogue: 3 to 4 lines, only consequences connected to the crime or its
   investigation — cut anything about a character's unrelated personal life.
+- postAccusationChoice: one final decision generated from this case's own
+  facts, with no correct answer — typically charge to the fullest extent
+  versus a lesser plea or mercy where the motive invites it, but let it fit
+  whatever actually happened here. A one-line prompt framing the choice,
+  and exactly 2 options, each a short label and a 1-2 line epilogueAddendum
+  describing what that choice changes about the ending. Never make one
+  option obviously right.
 - roadsNotTaken: scaled to the scorecard you just determined. If killer,
   method, and motive are all "correct", write exactly 2 short atmospheric
   lines, no coaching tone. If any is "partial" or "missed", write the fuller
@@ -449,7 +506,10 @@ Then write:
 
 Respond with ONLY this JSON:
 { "verdictNarration": "", "score": { "killer": "", "method": "", "motive": "" },
-  "trueSolution": "", "epilogue": "", "roadsNotTaken": ["", ""] }
+  "trueSolution": "", "epilogue": "",
+  "postAccusationChoice": { "prompt": "", "options": [ { "label": "", "epilogueAddendum": "" },
+                                                        { "label": "", "epilogueAddendum": "" } ] },
+  "roadsNotTaken": ["", ""] }
 ```
 
 ## 8. Acceptance criteria (Stage 1 done means)
@@ -470,6 +530,10 @@ Respond with ONLY this JSON:
 14. No lead card or narration line references a named person before that person has appeared in narration — enforced entirely by the turn prompt's cast-introduction rule (section 7.5); there is no client-side filtering, since the frontend renders whatever the model returns.
 15. (Stage 2.0a) Every generated case's evidence map gives all 4 suspects at least one clue that appears to implicate them, not only the culprit (section 7.2); every `turn` request/response carries `mentionTally`, initialized to `{}` at case creation and round-tripped verbatim by the frontend; the turn prompt's screen-time-balance and no-consecutive-lead-suspect rules (section 7.5) are the entire enforcement mechanism — there is no client-side check.
 16. (Stage 2.0a) Every case-file page — the opening scene, each turn, the accusation screen's clock-expired inline narration, the verdict screen, and archive-detail pages — renders its own dateline stamp showing the `currentTime` that applied when that page happened, in addition to the header clock bar.
+17. (Stage 2.0b) Every generated case's evidence map marks exactly 3 of its 8 clues `admissible: true`, at least one obtainable only through a time-costly action (section 7.2); `securedEvidence` starts at `[]`, round-trips verbatim through every `turn` and into `accusation`, and its length is shown plainly as "Evidence N/3" in the header — with no indication anywhere in the UI of which clues count, since the turn prompt is told never to narrate that bookkeeping (section 7.5).
+18. (Stage 2.0b) The accusation prompt's outcome logic (section 7.6) covers all three GM-scored cases from the killer score and `securedEvidence`: correct culprit at 3/3 evidence (conviction holds), correct culprit under 3/3 (technicality walk), and wrong culprit (innocent charged, real culprit free) — each with its consequence stated in the epilogue, layered with "the clock already ran out" framing whenever `clockExpired` was true. There is no separate outcome field; the frontend renders whatever `verdictNarration`/`epilogue` come back.
+19. (Stage 2.0b) Whenever an `accusation` response includes a valid `postAccusationChoice` (a prompt and exactly 2 options), the verdict screen shows a decision card before the epilogue; picking an option appends its `epilogueAddendum` to the base `epilogue`, reveals "The Threads You Left Hanging" and the New Case/Back to Home buttons, and is the point at which the game gets archived to `cf-archive` — none of that renders or happens before a choice is made. A response with no valid `postAccusationChoice` renders and archives immediately, exactly as before Stage 2.0b.
+20. (Stage 2.0b) Every generated case's culprit occupies a structurally trusted role (section 7.1); every suspect gets at least one visibly evasive scene over the course of the case, textured the same as the culprit's (section 7.5); leads are shuffled with position never correlating with importance (section 7.5, strengthened from Stage 1.5's plain "shuffle"); and the accusation form's suspect dropdown is shuffled client-side on every visit so `caseFile.suspects`' generation order is never exposed to the player.
 
 ## 9. Out of scope for Stage 1
 
