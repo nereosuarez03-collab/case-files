@@ -95,6 +95,12 @@ Requirements:
   make the case FAIRLY solvable: a careful player following real clues can
   identify killer, method, and motive.
 - One piece of physical evidence must contradict the killer's alibi.
+- Every one of the 4 suspects, not only the culprit, must have at least one
+  clue in the evidence map whose pointsTo names them — a concrete piece of
+  evidence that appears to implicate them, not just a stated motive from the
+  core file. Red herrings are the natural way to give innocents this: a red
+  herring that points at an innocent suspect satisfies both requirements at
+  once.
 - At least one clue or thread that can be permanently lost if the detectives
   don't pursue it in time.
 - A three-act plan for pacing: act1 (the scene and the suspects come into
@@ -162,7 +168,7 @@ Respond with ONLY this JSON:
 { "openingNarration": "", "leads": ["", "", "", ""], "recap": "" }`;
 }
 
-function buildTurnPrompt({ det1, det2, caseFileJson, recap, recentTurnsJson, turnCount, clockBudgetHours, hoursRemaining, currentAct, tone, action }) {
+function buildTurnPrompt({ det1, det2, caseFileJson, recap, mentionTallyJson, recentTurnsJson, turnCount, clockBudgetHours, hoursRemaining, currentAct, tone, action }) {
   const isDread = tone === 'dread';
   const dreadRule = isDread ? `
 - Dread pacing: reveal at most one "apparent phenomenon" per act, with
@@ -179,6 +185,7 @@ so far, and the most recent turns.
 
 HIDDEN CASE FILE: ${caseFileJson}
 RECAP: ${recap}
+MENTION TALLY: ${mentionTallyJson}
 RECENT TURNS: ${recentTurnsJson}
 TURN NUMBER: ${turnCount}. CLOCK: ${hoursRemaining} hours remaining of ${clockBudgetHours}, currently ${currentAct}.
 THE DETECTIVES NOW: ${action}
@@ -200,6 +207,18 @@ Rules:
   themselves (surveillance, a message, a witness silenced, misdirection
   aimed at them) and may put a named NPC in danger — tension over shock,
   never gore.${dreadRule}
+- Screen-time balance: keep suspect appearances roughly even across all four
+  suspects through act1 and act2, using MENTION TALLY as your guide — a
+  suspect "appears" when named in this turn's narration, and separately when
+  named in a lead you propose. If the culprit is currently the most-mentioned
+  suspect, foreground other suspects in the scenes that follow until the
+  tally evens out. This balance requirement is lifted only in act3, where the
+  case is allowed to converge.
+- Give innocent suspects' secrets and evasions the same narrative weight and
+  specificity as the culprit's crime-lies — when an innocent lies badly about
+  their secret, write it with the same concrete, attention-grabbing detail as
+  the culprit lying well. A player's suspicion should never simply track
+  whichever suspect gets the most vivid treatment.
 - Never let a lead name, or narration reference as already known, a person
   who hasn't yet been introduced in narration. Keep a "cast so far" note in
   the recap and check new leads against it.
@@ -238,14 +257,24 @@ Rules:
   person, place, or record only ("The boathouse", "Carolyn's phone
   records") — no conclusions, no urgency words, no implied ranking by order.
   Shuffle their order. Never reference a fact that hasn't already been
-  surfaced in narration.
+  surfaced in narration. Leads must not name the same suspect two turns in a
+  row unless the detectives' own action this turn specifically forces it —
+  check RECENT TURNS' most recent GM turn for which suspect(s) its leads
+  named, and avoid repeating them here.
 - Update the recap: 120 words max, neutral, cover everything discovered so
   far including this turn, a short "cast so far" list of named people
   already introduced, and note any thread that just closed offstage. The
   recap is your only long-term memory.
+- Update mentionTally from MENTION TALLY: for every suspect named in this
+  turn's narration, increment their "turns" count by 1 from the input tally;
+  for every suspect named in a lead you just proposed, increment their
+  "leads" count by 1. Suspects untouched this turn keep their prior counts.
+  Return the full tally with an entry for every suspect in the case file,
+  even ones sitting at 0.
 
 Respond with ONLY this JSON:
-{ "narration": "", "leads": ["", "", ""], "recap": "", "hoursSpent": 0, "currentTime": "" }`;
+{ "narration": "", "leads": ["", "", ""], "recap": "", "hoursSpent": 0, "currentTime": "",
+  "mentionTally": { "SuspectName": { "turns": 0, "leads": 0 } } }`;
 }
 
 function buildAccusationPrompt({ caseFileJson, recap, det1, det2, killer, method, motive }) {
