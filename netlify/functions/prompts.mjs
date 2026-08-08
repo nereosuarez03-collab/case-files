@@ -48,6 +48,10 @@ Requirements:
   a message, a witness silenced, misdirection aimed at them). Most cases
   should be passive or reactive; reserve hostile for a culprit it genuinely
   fits.
+- The culprit occupies a structurally trusted role that makes them
+  unsuspicious by default: the one who found the body, reported it, is
+  assisting the investigation, or is a caretaker or family confidant others
+  rely on. Their trustworthiness should be structural, not merely claimed.
 - A case clock: caseStart (the in-story day and time the investigation
   begins, terse, e.g. "Day 1, 9:40 PM") and a deadlineEvent — one specific
   event invented from this case's own facts that occurs when the clock
@@ -101,6 +105,13 @@ Requirements:
   core file. Red herrings are the natural way to give innocents this: a red
   herring that points at an innocent suspect satisfies both requirements at
   once.
+- Mark exactly 3 of the 8 clues "admissible": true — hard, court-usable
+  evidence (forensics, records, documents, a physical object tied to the
+  culprit). Everything else is "admissible": false — inference, hearsay,
+  behavioral reads, anything a defense attorney would tear apart alone. At
+  least one of the 3 admissible clues must be obtainable only through a
+  time-costly action (a lab result, a warrant, a records pull) — never
+  something available on a first glance.
 - At least one clue or thread that can be permanently lost if the detectives
   don't pursue it in time.
 - A three-act plan for pacing: act1 (the scene and the suspects come into
@@ -113,7 +124,7 @@ Requirements:
 Respond with ONLY this JSON:
 {
   "evidenceMap": [ { "clue": "", "location": "", "pointsTo": "",
-                     "redHerring": false } ],
+                     "redHerring": false, "admissible": false } ],
   "actPlan": { "act1": "", "act2": "", "act3": "" }
 }`;
 }
@@ -168,7 +179,7 @@ Respond with ONLY this JSON:
 { "openingNarration": "", "leads": ["", "", "", ""], "recap": "" }`;
 }
 
-function buildTurnPrompt({ det1, det2, caseFileJson, recap, mentionTallyJson, recentTurnsJson, turnCount, clockBudgetHours, hoursRemaining, currentAct, tone, action }) {
+function buildTurnPrompt({ det1, det2, caseFileJson, recap, mentionTallyJson, securedEvidenceJson, recentTurnsJson, turnCount, clockBudgetHours, hoursRemaining, currentAct, tone, action }) {
   const isDread = tone === 'dread';
   const dreadRule = isDread ? `
 - Dread pacing: reveal at most one "apparent phenomenon" per act, with
@@ -186,6 +197,7 @@ so far, and the most recent turns.
 HIDDEN CASE FILE: ${caseFileJson}
 RECAP: ${recap}
 MENTION TALLY: ${mentionTallyJson}
+SECURED EVIDENCE: ${securedEvidenceJson}
 RECENT TURNS: ${recentTurnsJson}
 TURN NUMBER: ${turnCount}. CLOCK: ${hoursRemaining} hours remaining of ${clockBudgetHours}, currently ${currentAct}.
 THE DETECTIVES NOW: ${action}
@@ -219,6 +231,12 @@ Rules:
   their secret, write it with the same concrete, attention-grabbing detail as
   the culprit lying well. A player's suspicion should never simply track
   whichever suspect gets the most vivid treatment.
+- Every suspect's secret must produce at least one scene, over the course of
+  the whole case, of visibly evasive behavior when it's touched — a stumble,
+  a too-quick answer, a subject change — textured exactly the same way as
+  the culprit's evasions. Track in the recap's cast-so-far note which
+  suspects still need this scene, so evasiveness stops being a tell for
+  guilt on its own.
 - Never let a lead name, or narration reference as already known, a person
   who hasn't yet been introduced in narration. Keep a "cast so far" note in
   the recap and check new leads against it.
@@ -256,15 +274,26 @@ Rules:
 - Then propose at most 3 leads (2 is fine): terse, neutral phrases naming a
   person, place, or record only ("The boathouse", "Carolyn's phone
   records") — no conclusions, no urgency words, no implied ranking by order.
-  Shuffle their order. Never reference a fact that hasn't already been
-  surfaced in narration. Leads must not name the same suspect two turns in a
-  row unless the detectives' own action this turn specifically forces it —
-  check RECENT TURNS' most recent GM turn for which suspect(s) its leads
-  named, and avoid repeating them here.
+  Shuffle their order — position must never correlate with which lead
+  matters most; don't habitually put the strongest lead first or last.
+  Never reference a fact that hasn't already been surfaced in narration.
+  Leads must not name the same suspect two turns in a row unless the
+  detectives' own action this turn specifically forces it — check RECENT
+  TURNS' most recent GM turn for which suspect(s) its leads named, and
+  avoid repeating them here.
+- Track admissible evidence separately from ordinary clues: whenever a clue
+  from the case file's evidenceMap marked "admissible": true is concretely
+  surfaced in this turn's narration — not just referenced, but established
+  as evidence now in hand — add its exact clue text to securedEvidence if
+  it isn't already there. Never remove an entry once added. Never state in
+  narration which clues are admissible, how many exist, or a running count
+  — the detectives should never see the DA's bookkeeping, only its
+  pressure.
 - Update the recap: 120 words max, neutral, cover everything discovered so
   far including this turn, a short "cast so far" list of named people
-  already introduced, and note any thread that just closed offstage. The
-  recap is your only long-term memory.
+  already introduced (noting which still need their evasion scene), and
+  note any thread that just closed offstage. The recap is your only
+  long-term memory.
 - Update mentionTally from MENTION TALLY: for every suspect named in this
   turn's narration, increment their "turns" count by 1 from the input tally;
   for every suspect named in a lead you just proposed, increment their
@@ -274,14 +303,16 @@ Rules:
 
 Respond with ONLY this JSON:
 { "narration": "", "leads": ["", "", ""], "recap": "", "hoursSpent": 0, "currentTime": "",
-  "mentionTally": { "SuspectName": { "turns": 0, "leads": 0 } } }`;
+  "mentionTally": { "SuspectName": { "turns": 0, "leads": 0 } }, "securedEvidence": [] }`;
 }
 
-function buildAccusationPrompt({ caseFileJson, recap, det1, det2, killer, method, motive }) {
+function buildAccusationPrompt({ caseFileJson, recap, securedEvidenceCount, clockStatus, det1, det2, killer, method, motive }) {
   return `You are the game master resolving the final accusation of a detective case.
 
 HIDDEN CASE FILE: ${caseFileJson}
 RECAP: ${recap}
+CLOCK STATUS: ${clockStatus}
+SECURED EVIDENCE: ${securedEvidenceCount}/3
 DETECTIVES: ${det1} and ${det2}
 THEIR ACCUSATION: killer: ${killer} | method: ${method} | motive: ${motive}
 
@@ -293,6 +324,21 @@ Score each of the three parts against the solution:
 - "missed": wrong.
 Judge meaning, not wording. Be generous with phrasing, strict with substance.
 
+Then determine the outcome from the killer score and SECURED EVIDENCE, and
+let it drive verdictNarration, epilogue, and the post-accusation choice:
+- Correct culprit ("correct" or "partial" killer score) with SECURED
+  EVIDENCE at 3/3: the charge holds. A clean conviction.
+- Correct culprit with SECURED EVIDENCE under 3/3: charges are filed but
+  don't stick — the culprit walks on a technicality. If posture is
+  "hostile", they act again; reflect that in the epilogue.
+- Wrong culprit ("missed" killer score): an innocent is charged and the
+  real culprit goes free. State a concrete cost in the epilogue: if
+  posture is "hostile", the real culprit acts again; otherwise the case
+  goes cold. Never mock the players.
+- If CLOCK STATUS shows the clock ran out before this accusation, the case
+  file's deadlineEvent already happened without them — the worst framing,
+  layered on top of whichever outcome above applies.
+
 Then write:
 - verdictNarration (250-400 words): the arrest or the aftermath, played out
   cinematically. If they accused the wrong person, show the consequence: the
@@ -303,6 +349,13 @@ Then write:
   two or three clues that pointed there.
 - epilogue: 3 to 4 lines, only consequences connected to the crime or its
   investigation — cut anything about a character's unrelated personal life.
+- postAccusationChoice: one final decision generated from this case's own
+  facts, with no correct answer — typically charge to the fullest extent
+  versus a lesser plea or mercy where the motive invites it, but let it fit
+  whatever actually happened here. A one-line prompt framing the choice,
+  and exactly 2 options, each a short label and a 1-2 line epilogueAddendum
+  describing what that choice changes about the ending. Never make one
+  option obviously right.
 - roadsNotTaken: scaled to the scorecard you just determined. If killer,
   method, and motive are all "correct", write exactly 2 short atmospheric
   lines, no coaching tone. If any is "partial" or "missed", write the fuller
@@ -315,7 +368,10 @@ Then write:
 
 Respond with ONLY this JSON:
 { "verdictNarration": "", "score": { "killer": "", "method": "", "motive": "" },
-  "trueSolution": "", "epilogue": "", "roadsNotTaken": ["", ""] }`;
+  "trueSolution": "", "epilogue": "",
+  "postAccusationChoice": { "prompt": "", "options": [ { "label": "", "epilogueAddendum": "" },
+                                                        { "label": "", "epilogueAddendum": "" } ] },
+  "roadsNotTaken": ["", ""] }`;
 }
 
 export {
