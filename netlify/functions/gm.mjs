@@ -99,7 +99,7 @@ export default async (req) => {
     }
     case 'turn': {
       const {
-        caseFile, recap, mentionTally, recentTurns, action, detectives = [], turnCount,
+        caseFile, recap, mentionTally, securedEvidence, recentTurns, action, detectives = [], turnCount,
         clockBudgetHours = 48, hoursRemaining, currentAct = 'act1', tone,
       } = body;
       prompt = buildTurnPrompt({
@@ -108,6 +108,7 @@ export default async (req) => {
         caseFileJson: JSON.stringify(caseFile),
         recap: recap || '',
         mentionTallyJson: JSON.stringify(mentionTally || {}),
+        securedEvidenceJson: JSON.stringify(securedEvidence || []),
         recentTurnsJson: JSON.stringify(recentTurns || []),
         turnCount,
         clockBudgetHours,
@@ -121,10 +122,12 @@ export default async (req) => {
       break;
     }
     case 'accusation': {
-      const { caseFile, recap, accusation = {}, detectives = [] } = body;
+      const { caseFile, recap, securedEvidence, clockExpired, accusation = {}, detectives = [] } = body;
       prompt = buildAccusationPrompt({
         caseFileJson: JSON.stringify(caseFile),
         recap: recap || '',
+        securedEvidenceCount: Array.isArray(securedEvidence) ? securedEvidence.length : 0,
+        clockStatus: clockExpired ? 'expired before this accusation' : 'within time',
         det1: detectives[0] || 'Detective One',
         det2: detectives[1] || 'Detective Two',
         killer: accusation.killer || '',
