@@ -99,7 +99,7 @@ export default async (req) => {
     }
     case 'turn': {
       const {
-        caseFile, recap, recentTurns, action, detectives = [], turnCount,
+        caseFile, recap, mentionTally, recentTurns, action, detectives = [], turnCount,
         clockBudgetHours = 48, hoursRemaining, currentAct = 'act1', tone,
       } = body;
       prompt = buildTurnPrompt({
@@ -107,6 +107,7 @@ export default async (req) => {
         det2: detectives[1] || 'Detective Two',
         caseFileJson: JSON.stringify(caseFile),
         recap: recap || '',
+        mentionTallyJson: JSON.stringify(mentionTally || {}),
         recentTurnsJson: JSON.stringify(recentTurns || []),
         turnCount,
         clockBudgetHours,
