@@ -392,6 +392,25 @@ a { color: inherit; }
   white-space: nowrap;
 }
 
+/* per-page dateline: the in-story day/time this page happened at, stamped
+   in the opposite top corner from the case-number stamp — quieter (pencil,
+   not thread red) since it's a timestamp annotation, not an official mark */
+.case-page .dateline {
+  position: absolute;
+  top: -10px;
+  left: 10px;
+  font-family: var(--font-type);
+  color: var(--pencil);
+  border-bottom: 1px solid var(--pencil);
+  padding: 3px 6px 2px;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  transform: rotate(-3deg);
+  background: rgba(239, 232, 216, 0.92);
+  white-space: nowrap;
+}
+
 .case-page .narration {
   font-family: var(--font-body);
   font-size: 1.02rem;

@@ -70,6 +70,16 @@ function esc(str) {
   }[c]));
 }
 
+// Renders the in-story day/time as a small stamped label at the top of a
+// case-page — the per-page counterpart to the header clock bar. Text comes
+// straight from whatever the GM authored for that page (caseStart for the
+// opening, currentTime for a turn); never reformatted or parsed, same as the
+// clock bar itself (see SPEC.md section 4). Omitted entirely when no time is
+// known yet (e.g. before a case exists).
+function datelineHtml(text) {
+  return text ? `<span class="dateline">${esc(text)}</span>` : '';
+}
+
 function formatDate(iso) {
   try {
     return new Date(iso).toLocaleDateString(undefined, {
@@ -142,6 +152,7 @@ const state = {
   pendingRequest: null, // { retry }
   loadingKind: 'newCase',
   streamingText: '', // standalone 'streaming' screen text (caseOpening / accusation)
+  streamingDateline: '', // dateline shown on the standalone streaming page, if known up front
   streamingTurn: null, // inline turn streaming: { text, phase: 'loading' | 'streaming' }
 };
 
@@ -219,10 +230,13 @@ function parseNdjsonLine(line) {
 // that grows the text into a case-page live. `loadingKind` lets a caller
 // (case opening, chained after the skeleton call) keep the same loading
 // label/lines as an earlier step instead of restarting them — defaults to
-// `type` itself.
-function runStreamingRequest(type, payload, onSuccess, loadingKind) {
-  state.pendingRequest = { retry: () => runStreamingRequest(type, payload, onSuccess, loadingKind) };
+// `type` itself. `datelineText`, if the caller already knows it before the
+// call resolves (e.g. caseOpening already has caseFile.caseStart), is shown
+// on the page immediately rather than waiting for the result.
+function runStreamingRequest(type, payload, onSuccess, loadingKind, datelineText) {
+  state.pendingRequest = { retry: () => runStreamingRequest(type, payload, onSuccess, loadingKind, datelineText) };
   state.streamingText = '';
+  state.streamingDateline = datelineText || '';
   ensureLoadingScreen(loadingKind || type);
 
   let switchedToStreaming = false;
@@ -387,6 +401,7 @@ function renderStreamingPage() {
   return `
     <div class="turn-feed" style="flex:1;">
       <div class="case-page">
+        ${datelineHtml(state.streamingDateline)}
         <span class="stamp">${caseNumber ? `Case ${esc(caseNumber)}` : 'Case File'}</span>
         <p class="narration"><span id="streaming-text"></span><span class="cursor">&nbsp;</span></p>
       </div>
@@ -519,6 +534,7 @@ function turnEntryHtml(t, game) {
     return `
       <div class="turn-entry">
         <div class="case-page">
+          ${datelineHtml(t.currentTime)}
           <span class="stamp">Case ${esc(game.caseFile.caseNumber || '')}</span>
           <p class="narration">${esc(t.narration)}</p>
         </div>
@@ -566,6 +582,7 @@ function renderGame() {
   const streamingHtml = streaming ? `
     <div class="turn-entry">
       <div class="case-page">
+        ${datelineHtml(game.currentTime)}
         <span class="stamp">Case ${esc(game.caseFile.caseNumber || '')}</span>
         ${streaming.phase === 'loading'
           ? `<div class="loading-line"><span id="loading-line-text"></span><span class="cursor">&nbsp;</span></div>`
@@ -620,6 +637,7 @@ function submitAction(actionText) {
   runTurnRequest({
     caseFile: game.caseFile,
     recap: game.recap,
+    mentionTally: game.mentionTally || {},
     recentTurns,
     action: text,
     detectives: game.detectives,
@@ -671,11 +689,13 @@ function runTurnRequest(payload, turnCount) {
 
 function onTurnSuccess(data, turnCount) {
   const game = state.currentGame;
-  game.turns.push({ role: 'gm', narration: data.narration, leads: data.leads || [] });
+  const newCurrentTime = data.currentTime || game.currentTime;
+  game.turns.push({ role: 'gm', narration: data.narration, leads: data.leads || [], currentTime: newCurrentTime });
   game.recap = data.recap || game.recap;
+  game.mentionTally = data.mentionTally || game.mentionTally || {};
   game.turnCount = turnCount;
   game.hoursElapsed = (game.hoursElapsed || 0) + (Number(data.hoursSpent) || 0);
-  game.currentTime = data.currentTime || game.currentTime;
+  game.currentTime = newCurrentTime;
   saveCurrentGame(game);
 
   // The clock running out forces the case to resolution: the deadlineEvent
@@ -714,6 +734,7 @@ function renderAccusationForm() {
       <div class="screen-header"><h1>Make an Accusation</h1></div>
       ${expired && lastGmTurn ? `
         <div class="case-page">
+          ${datelineHtml(lastGmTurn.currentTime)}
           <span class="stamp">Case ${esc(game.caseFile.caseNumber || '')}</span>
           <p class="narration">${esc(lastGmTurn.narration)}</p>
         </div>
@@ -772,16 +793,21 @@ function submitAccusationConfirmed() {
     recap: game.recap,
     accusation: { killer, method: f.method.trim(), motive: f.motive.trim() },
     detectives: game.detectives,
-  }, onAccusationSuccess);
+  }, onAccusationSuccess, 'accusation', game.currentTime || '');
 }
 
 function onAccusationSuccess(data) {
   const game = state.currentGame;
+  // The accusation response has no clock fields of its own — the case is
+  // closing, not advancing — so the dateline carried forward onto the
+  // verdict/archive pages is simply the last time the clock showed.
+  const closedAt = game.currentTime || '';
   const entry = {
     title: game.caseFile.title,
     caseNumber: game.caseFile.caseNumber,
     date: new Date().toISOString(),
     detectives: game.detectives,
+    currentTime: closedAt,
     score: data.score || {},
     trueSolution: data.trueSolution || '',
     epilogue: data.epilogue || '',
@@ -798,7 +824,7 @@ function onAccusationSuccess(data) {
   state.currentGame = null;
   state.accusationForm = null;
 
-  state.lastVerdict = data;
+  state.lastVerdict = { ...data, currentTime: closedAt };
   state.screen = 'verdict';
   render();
 }
@@ -823,6 +849,7 @@ function renderVerdict() {
     <div class="verdict-screen">
       <div class="screen-header"><h1>Verdict</h1></div>
       <div class="case-page">
+        ${datelineHtml(v.currentTime)}
         <span class="stamp">Closed</span>
         <p class="narration">${esc(v.verdictNarration)}</p>
       </div>
@@ -907,6 +934,7 @@ function renderArchiveDetail() {
       <div class="screen-header"><h1>${esc(entry.title || 'Untitled Case')}</h1></div>
       <p class="empty-note" style="text-align:left;font-style:normal;padding:0 0 14px;">${esc(formatDate(entry.date))} &middot; ${esc((entry.detectives || []).join(' & '))}</p>
       <div class="case-page">
+        ${datelineHtml(entry.currentTime)}
         <span class="stamp">Case ${esc(entry.caseNumber || '')}</span>
         <p class="narration">${esc(entry.verdictNarration)}</p>
       </div>
@@ -1195,6 +1223,7 @@ function runCaseOpening(originalPayload, caseFile) {
     openingPayload,
     (data) => onCaseOpeningSuccess(data, caseFile, originalPayload),
     'newCase', // keep the core/detail phases' loading label/lines, no restart
+    caseFile.caseStart || '',
   );
 }
 
@@ -1210,7 +1239,13 @@ function onCaseOpeningSuccess(data, caseFile, originalPayload) {
     tone: originalPayload.tone || 'straight',
     caseFile,
     recap: data.recap,
-    turns: [{ role: 'gm', narration: data.openingNarration, leads: data.leads || [] }],
+    // Per-suspect mention tally (turns appeared in / leads naming them),
+    // maintained by the GM turn to turn to keep screen-time roughly even
+    // across suspects — see buildTurnPrompt's MENTION TALLY rules. The
+    // opening dispatch doesn't produce one yet; it starts empty and the
+    // first turn response fills it in.
+    mentionTally: {},
+    turns: [{ role: 'gm', narration: data.openingNarration, leads: data.leads || [], currentTime: caseFile.caseStart || '' }],
     turnCount: 0,
     status: 'active',
   };
